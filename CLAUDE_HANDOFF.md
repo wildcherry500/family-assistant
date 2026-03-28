@@ -52,6 +52,11 @@ Re-grant IAM (single line — no backslash continuations in zsh):
 gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=family-assistant-dev-490204 --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" --role="roles/pubsub.publisher"
 ```
 
+## Checkpoint Behavior (2026-03-28)
+- The "checkpoint at 10% context" instruction is **manual only** — no hook is configured
+- When user says "checkpoint": update this file, then `git add -A && git commit -m "checkpoint" && git push origin master`
+- No automated hook exists in `~/.claude/settings.json` or project `settings.local.json` for this
+
 ## Deferred Items
 
 ### CRITICAL: PState data is NOT persistent (InProcessCluster in production)
