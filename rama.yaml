@@ -1,0 +1,30 @@
+# Rama single-node configuration — Mac Mini local production
+#
+# IMPORTANT: /Volumes/CORSAIR must be mounted before starting ZooKeeper.
+# If the drive is not mounted, local.dir will silently fall back to the
+# boot volume and PState data will be written to the wrong location.
+#
+# Setup: copy this file to ~/rama-release/rama.yaml alongside the ./rama CLI.
+# See README.md for the full startup sequence.
+
+zookeeper.servers:
+  - "localhost"
+
+# PState data, depot replica logs, and module JARs all live here.
+# /Volumes/CORSAIR is fast NVMe and already hosts the project source.
+local.dir: "/Volumes/CORSAIR/rama-data"
+
+conductor.host: "localhost"
+
+supervisor.port.range:
+  - 3000
+  - 4000
+
+# Moved off default 8888 — conflicts with GmailService OAuth callback port.
+cluster.ui.port: 8889
+
+# Worker JVM — 2 GB per worker; adjust if Mac Mini is under memory pressure.
+worker.child.opts: "-Xmx2g"
+
+# Disable expensive schema validations in production (Rama docs recommendation).
+pstate.maximal.schema.validations: false

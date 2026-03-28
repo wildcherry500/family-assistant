@@ -42,12 +42,18 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
         public final String familyId;
         public final String question;
         public final String requesterTimezone; // e.g. "America/Los_Angeles", "America/New_York"
+        public final String accountLabel;      // null = no filter; non-null = restrict to this account
 
         public QueryRequest(String familyId, String question, String requesterTimezone) {
+            this(familyId, question, requesterTimezone, null);
+        }
+
+        public QueryRequest(String familyId, String question, String requesterTimezone, String accountLabel) {
             this.familyId           = familyId;
             this.question           = question;
             this.requesterTimezone  = requesterTimezone != null
                                       ? requesterTimezone : "America/Los_Angeles";
+            this.accountLabel       = accountLabel;
         }
     }
 
@@ -63,11 +69,20 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
         public final String originalQuestion;
         public final String familyId;
         public final String requesterTimezone;
+        public final String accountLabel;   // null = no filter; non-null = restrict to this account
 
         public QueryParams(String queryType, String childName,
                            String dateFrom, String dateTo, String categoryFilter,
                            String originalQuestion, String familyId,
                            String requesterTimezone) {
+            this(queryType, childName, dateFrom, dateTo, categoryFilter,
+                 originalQuestion, familyId, requesterTimezone, null);
+        }
+
+        public QueryParams(String queryType, String childName,
+                           String dateFrom, String dateTo, String categoryFilter,
+                           String originalQuestion, String familyId,
+                           String requesterTimezone, String accountLabel) {
             this.queryType         = queryType;
             this.childName         = childName;
             this.dateFrom          = dateFrom;
@@ -76,6 +91,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
             this.originalQuestion  = originalQuestion;
             this.familyId          = familyId;
             this.requesterTimezone = requesterTimezone;
+            this.accountLabel      = accountLabel;
         }
     }
 
@@ -115,7 +131,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                         params = new QueryParams(
                             "UPCOMING_EVENTS", null, null, null, null,
                             request.question, request.familyId,
-                            request.requesterTimezone);
+                            request.requesterTimezone, request.accountLabel);
                     } else {
                         String today = Instant.now()
                             .atZone(ZoneId.of(request.requesterTimezone))
@@ -143,7 +159,8 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                         String response = model.chat(prompt);
                         params = parseQueryParams(
                             response, request.question,
-                            request.familyId, request.requesterTimezone);
+                            request.familyId, request.requesterTimezone,
+                            request.accountLabel);
                     }
 
                     agentNode.emit("fetch-data", params);
@@ -245,6 +262,12 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                         }
                     }
 
+                    // Apply accountLabel filter in memory
+                    if (params.accountLabel != null) {
+                        matched.removeIf(ev ->
+                            !params.accountLabel.equals(ev.get("accountLabel")));
+                    }
+
                     // Sort by soonest first
                     matched.sort((a, b) ->
                         Long.compare(effectiveTime(a), effectiveTime(b)));
@@ -309,7 +332,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
     // -----------------------------------------------------------------------
 
     private QueryParams parseQueryParams(String json, String originalQuestion,
-                                          String familyId, String timezone) {
+                                          String familyId, String timezone, String accountLabel) {
         try {
             String clean = json.replaceAll("```json", "").replaceAll("```", "").trim();
             // Simple field extraction without Jackson dependency
@@ -325,10 +348,10 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
             if ("null".equalsIgnoreCase(categoryFilter)) categoryFilter = null;
 
             return new QueryParams(queryType, childName, dateFrom, dateTo,
-                categoryFilter, originalQuestion, familyId, timezone);
+                categoryFilter, originalQuestion, familyId, timezone, accountLabel);
         } catch (Exception e) {
             return new QueryParams("GENERAL", null, null, null, null,
-                originalQuestion, familyId, timezone);
+                originalQuestion, familyId, timezone, accountLabel);
         }
     }
 

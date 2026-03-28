@@ -51,8 +51,11 @@ public class WebhookReceiver {
         app = Javalin.create().start(port);
 
         app.post("/webhooks/gmail", ctx -> {
-            long historyId = extractHistoryId(ctx.body());
-            System.out.println("[WebhookReceiver] Gmail notification received, historyId=" + historyId);
+            String rawBody    = ctx.body();
+            long historyId    = extractHistoryId(rawBody);
+            String accountLabel = extractEmailAddress(rawBody);
+            System.out.println("[WebhookReceiver] Gmail notification received, historyId=" + historyId
+                + ", account=" + accountLabel);
 
             // Acknowledge immediately — Google retries if it doesn't receive 200 within ~10 s
             ctx.status(200);
@@ -63,7 +66,7 @@ public class WebhookReceiver {
                     GmailIngestionModule.IngestionSummary summary =
                         (GmailIngestionModule.IngestionSummary)
                             gmailIngestionClient.invoke(
-                                new GmailIngestionModule.FetchRequest("me", 10));
+                                new GmailIngestionModule.FetchRequest("me", 10, accountLabel));
                     System.out.println("[WebhookReceiver] historyId=" + historyId + " → " + summary);
                 } catch (Exception e) {
                     System.err.println("[WebhookReceiver] Ingestion failed for historyId="
@@ -91,20 +94,37 @@ public class WebhookReceiver {
      */
     private long extractHistoryId(String body) {
         try {
-            JsonNode root     = MAPPER.readTree(body);
-            JsonNode message  = root.path("message");
-            if (message.isMissingNode()) return 0;
-
-            String data = message.path("data").asText("");
-            if (data.isBlank()) return 0;
-
-            byte[]   decoded      = Base64.getDecoder().decode(data);
-            JsonNode notification = MAPPER.readTree(decoded);
-
-            return notification.path("historyId").asLong(0);
+            JsonNode notification = decodeNotification(body);
+            return notification == null ? 0 : notification.path("historyId").asLong(0);
         } catch (Exception e) {
             System.err.println("[WebhookReceiver] Failed to parse Pub/Sub message: " + e.getMessage());
             return 0;
         }
+    }
+
+    /**
+     * Extracts the emailAddress field from the Pub/Sub notification payload.
+     * Returns null if absent or malformed.
+     */
+    private String extractEmailAddress(String body) {
+        try {
+            JsonNode notification = decodeNotification(body);
+            if (notification == null) return null;
+            String email = notification.path("emailAddress").asText(null);
+            return (email != null && !email.isBlank()) ? email : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Decodes the base64 Pub/Sub data field and returns the parsed notification JSON. */
+    private JsonNode decodeNotification(String body) throws Exception {
+        JsonNode root    = MAPPER.readTree(body);
+        JsonNode message = root.path("message");
+        if (message.isMissingNode()) return null;
+        String data = message.path("data").asText("");
+        if (data.isBlank()) return null;
+        byte[] decoded = Base64.getDecoder().decode(data);
+        return MAPPER.readTree(decoded);
     }
 }

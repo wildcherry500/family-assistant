@@ -68,12 +68,13 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         public final String emailSubject;   // Subject header
         public final String gmailMessageId; // Gmail message ID for traceability
         public final long   receivedAt;     // epoch millis when Gmail received the email
+        public final String accountLabel;   // Gmail account that received this email, may be null
 
         public ParsedEvent(String category, String title, String description,
                            String startTime, String deadline,
                            String childId, String childName, String sourceEmail,
                            String senderEmail, String senderName, String emailSubject,
-                           String gmailMessageId, long receivedAt) {
+                           String gmailMessageId, long receivedAt, String accountLabel) {
             this.category      = category;
             this.title         = title;
             this.description   = description;
@@ -87,6 +88,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
             this.emailSubject  = emailSubject;
             this.gmailMessageId = gmailMessageId;
             this.receivedAt    = receivedAt;
+            this.accountLabel  = accountLabel;
         }
     }
 
@@ -184,7 +186,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                         null, childName, message.body,
                         message.senderEmail, message.senderName,
                         message.emailSubject, message.gmailMessageId,
-                        message.receivedAt
+                        message.receivedAt, message.accountLabel
                     );
 
                     agentNode.emit("write-to-store", event);
@@ -213,6 +215,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("childId",        event.childId);
                     eventRecord.put("childName",      event.childName);
                     eventRecord.put("sourceType",     "email");
+                    eventRecord.put("accountLabel",   event.accountLabel);
                     eventRecord.put("eventType",      event.category);
                     eventRecord.put("title",          event.title);
                     eventRecord.put("description",    event.description);

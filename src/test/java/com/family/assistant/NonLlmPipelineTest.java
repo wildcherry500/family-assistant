@@ -350,7 +350,7 @@ public class NonLlmPipelineTest {
             "2026-03-20T08:30:00Z", "2026-03-18T00:00:00Z",
             "billy", "Billy", "raw email body",
             "teacher@school.edu", "Mr. Jacobs", "Zoo Field Trip",
-            "gmail-msg-123", System.currentTimeMillis());
+            "gmail-msg-123", System.currentTimeMillis(), "todd@gmail.com");
 
         EmailParsingModule.ParsedEvent deserialized = roundTrip(original);
 

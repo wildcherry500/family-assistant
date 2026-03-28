@@ -80,11 +80,11 @@ public class EmailIngestionTest {
     public void testBlankAndNullEmailsAreSkipped() throws Exception {
         // EmailIngestionModule.ingest expects List<GmailMessage>; blank/null bodies are skipped
         List<GmailMessage> inputs = new ArrayList<>(Arrays.asList(
-            new GmailMessage("",   "id1", "test@test.com", "Test", "Subject", 0L),
-            new GmailMessage("   ","id2", "test@test.com", "Test", "Subject", 0L),
-            new GmailMessage("\n", "id3", "test@test.com", "Test", "Subject", 0L),
+            new GmailMessage("",   "id1", "test@test.com", "Test", "Subject", 0L, null),
+            new GmailMessage("   ","id2", "test@test.com", "Test", "Subject", 0L, null),
+            new GmailMessage("\n", "id3", "test@test.com", "Test", "Subject", 0L, null),
             null,
-            new GmailMessage("\t", "id5", "test@test.com", "Test", "Subject", 0L)
+            new GmailMessage("\t", "id5", "test@test.com", "Test", "Subject", 0L, null)
         ));
 
         EmailIngestionModule.IngestionResult result =

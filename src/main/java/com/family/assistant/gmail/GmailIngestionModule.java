@@ -41,10 +41,16 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
     public static class FetchRequest implements com.rpl.rama.RamaSerializable {
         public final String userId;
         public final int maxResults;
+        public final String accountLabel; // Gmail account email, e.g. "user@gmail.com"; null if unknown
 
         public FetchRequest(String userId, int maxResults) {
-            this.userId     = userId;
-            this.maxResults = maxResults;
+            this(userId, maxResults, null);
+        }
+
+        public FetchRequest(String userId, int maxResults, String accountLabel) {
+            this.userId       = userId;
+            this.maxResults   = maxResults;
+            this.accountLabel = accountLabel;
         }
     }
 
@@ -225,7 +231,8 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                                 gmailMessages.add(new GmailMessage(
                                     body, msg.getId(),
                                     sender[0], sender[1],
-                                    subject, received));
+                                    subject, received,
+                                    request.accountLabel));
                                 messageIds.add(msg.getId());
                             }
                         } catch (Exception e) {

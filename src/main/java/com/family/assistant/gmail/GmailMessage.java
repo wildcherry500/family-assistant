@@ -16,15 +16,18 @@ public class GmailMessage implements RamaSerializable {
     public final String senderName;     // display name from From header, may be null
     public final String emailSubject;   // Subject header value, may be null
     public final long   receivedAt;     // internalDate — epoch millis when Gmail received it
+    public final String accountLabel;   // Gmail account that received this message, e.g. "user@gmail.com"
 
     public GmailMessage(String body, String gmailMessageId,
                         String senderEmail, String senderName,
-                        String emailSubject, long receivedAt) {
+                        String emailSubject, long receivedAt,
+                        String accountLabel) {
         this.body           = body;
         this.gmailMessageId = gmailMessageId;
         this.senderEmail    = senderEmail;
         this.senderName     = senderName;
         this.emailSubject   = emailSubject;
         this.receivedAt     = receivedAt;
+        this.accountLabel   = accountLabel;
     }
 }

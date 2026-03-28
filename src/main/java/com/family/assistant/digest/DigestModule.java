@@ -45,11 +45,17 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
         public final String familyId;
         public final long windowStartMs;
         public final long windowEndMs;
+        public final String accountLabel; // null = no filter; non-null = return only events from this account
 
         public DigestRequest(String familyId, long windowStartMs, long windowEndMs) {
+            this(familyId, windowStartMs, windowEndMs, null);
+        }
+
+        public DigestRequest(String familyId, long windowStartMs, long windowEndMs, String accountLabel) {
             this.familyId       = familyId;
             this.windowStartMs  = windowStartMs;
             this.windowEndMs    = windowEndMs;
+            this.accountLabel   = accountLabel;
         }
     }
 
@@ -102,6 +108,11 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                                 windowEvents.add(event);
                             }
                         }
+                    }
+                    // Apply accountLabel filter in memory after time-window selection
+                    if (request.accountLabel != null) {
+                        windowEvents.removeIf(ev ->
+                            !request.accountLabel.equals(ev.get("accountLabel")));
                     }
 
                     // Sort by soonest first

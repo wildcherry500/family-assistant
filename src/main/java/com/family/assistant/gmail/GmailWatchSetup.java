@@ -56,6 +56,26 @@ public class GmailWatchSetup {
         return response;
     }
 
+    /**
+     * Renews Gmail push watches for all configured accounts.
+     *
+     * NOTE: GmailService currently authenticates a single OAuth account via the
+     * tokens/ directory. True multi-account support requires per-account token
+     * directories and is tracked as future work. For now, renewWatch() is called
+     * once regardless of how many accounts are listed in config.
+     *
+     * @param accounts list of Gmail account emails from PersonalAssistantConfig
+     */
+    public static void renewAllWatches(List<String> accounts) throws Exception {
+        if (accounts == null || accounts.isEmpty()) {
+            LOG.info("[GmailWatchSetup] No accounts configured — renewing default account");
+            renewWatch();
+            return;
+        }
+        LOG.info("[GmailWatchSetup] Renewing watch for configured accounts: " + accounts);
+        renewWatch(); // single OAuth token for now; TODO: per-account GmailService
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("Connecting to Gmail...");
         WatchResponse response = renewWatch();

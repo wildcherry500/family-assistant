@@ -55,6 +55,12 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
+        // Inverted index: familyId -> accountLabel -> Set<eventId>
+        stream.pstate("$$events-by-account",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.setSchema(String.class))));
+
         stream.source("*family-events").out("*record")
           .select("*record", Path.key("familyId")).out("*familyId")
           .select("*record", Path.key("id")).out("*eventId")
@@ -72,6 +78,11 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           // Conditionally write category index (only when eventType is non-null and non-blank)
           .ifTrue(new Expr(FamilySchemaModule::isPresent, "*eventType"),
               Block.localTransform("$$events-by-category",
-                  Path.key("*familyId").key("*eventType").nullToSet().voidSetElem().termVal("*eventId")));
+                  Path.key("*familyId").key("*eventType").nullToSet().voidSetElem().termVal("*eventId")))
+          // Extract accountLabel and conditionally write account index
+          .select("*record", Path.key("accountLabel")).out("*accountLabel")
+          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*accountLabel"),
+              Block.localTransform("$$events-by-account",
+                  Path.key("*familyId").key("*accountLabel").nullToSet().voidSetElem().termVal("*eventId")));
     }
 }

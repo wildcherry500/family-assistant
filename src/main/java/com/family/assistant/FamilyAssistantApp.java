@@ -1,5 +1,6 @@
 package com.family.assistant;
 
+import com.family.assistant.PersonalAssistantConfig;
 import com.family.assistant.digest.DigestModule;
 import com.family.assistant.email.EmailIngestionModule;
 import com.family.assistant.email.EmailParsingModule;
@@ -48,6 +49,11 @@ public class FamilyAssistantApp {
     private static final long WATCH_RENEWAL_DAYS = 5;
 
     public static void main(String[] args) throws Exception {
+
+        PersonalAssistantConfig config = PersonalAssistantConfig.load();
+        LOG.info("[FamilyAssistantApp] Owner: " + config.ownerName
+            + " | Accounts: " + config.gmailAccounts
+            + " | Timezone: " + config.timezone);
 
         int port = DEFAULT_PORT;
         String portEnv = System.getenv("WEBHOOK_PORT");
@@ -126,9 +132,8 @@ public class FamilyAssistantApp {
         });
         watchScheduler.scheduleAtFixedRate(() -> {
             try {
-                var response = GmailWatchSetup.renewWatch();
-                LOG.info("[WatchScheduler] Gmail watch renewed, expires "
-                    + new java.util.Date(response.getExpiration()));
+                GmailWatchSetup.renewAllWatches(config.gmailAccounts);
+                LOG.info("[WatchScheduler] Next renewal in " + WATCH_RENEWAL_DAYS + " days");
             } catch (Exception e) {
                 LOG.log(Level.SEVERE, "[WatchScheduler] Failed to renew Gmail watch", e);
             }
