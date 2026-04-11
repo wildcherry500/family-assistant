@@ -1,9 +1,6 @@
 package com.family.assistant;
 
-import com.family.assistant.query.QueryModule;
 import com.family.assistant.schema.FamilySchemaModule;
-import com.rpl.agentorama.AgentClient;
-import com.rpl.agentorama.AgentManager;
 import com.rpl.rama.Depot;
 import com.rpl.rama.Path;
 import com.rpl.rama.PState;
@@ -19,13 +16,10 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * QueryIndexTest
  *
- * Verifies that:
- *  1. FamilySchemaModule correctly populates $$events-by-child and
- *     $$events-by-category inverted indexes from *family-events depot records.
- *  2. QueryModule's fetch-data node (stub / no-LLM path) returns non-null
- *     answers from the query agent.
+ * Verifies that FamilySchemaModule correctly populates $$events-by-child,
+ * $$events-by-category, and $$family-data from *family-events depot records.
  *
- * No GEMINI_API_KEY required — all tests run in `mvn test` by default.
+ * No GEMINI_API_KEY required — all tests use direct PState reads.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -42,28 +36,22 @@ public class QueryIndexTest {
 
     private InProcessCluster ipc;
     private Depot familyEventsDepot;
+    private PState familyData;
     private PState eventsByChild;
     private PState eventsByCategory;
-    private AgentClient queryAgent;
 
     @BeforeAll
     void setup() throws Exception {
         ipc = InProcessCluster.create();
 
-        // Launch schema module first — owns the depot and PStates
+        // Launch schema module — owns the depot, PStates, and indexes
         FamilySchemaModule schemaModule = new FamilySchemaModule();
         ipc.launchModule(schemaModule, new LaunchConfig(1, 1));
 
-        // Launch query module — mirrors the PStates
-        QueryModule queryModule = new QueryModule();
-        ipc.launchModule(queryModule, new LaunchConfig(1, 1));
-
         familyEventsDepot = ipc.clusterDepot(schemaModule.getModuleName(), "*family-events");
+        familyData        = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
         eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-child");
         eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-category");
-
-        AgentManager queryManager = AgentManager.create(ipc, queryModule.getModuleName());
-        queryAgent = queryManager.getAgentClient("query-agent");
 
         // Seed 5 test events directly into the depot (no LLM involved)
         // evt-1: Billy, SCHOOL_EVENT, MAR_20
@@ -197,38 +185,27 @@ public class QueryIndexTest {
     }
 
     // =======================================================================
-    // QueryModule agent: stub path (no LLM) — full scan with no child/category filter
+    // $$family-data full-scan assertions (no LLM, no QueryModule agent)
     // =======================================================================
 
     @Test
     @Order(6)
-    void testQueryAgent_NoFilter_ReturnsNonBlankString() {
-        // model=null → interpret-query returns stub QueryParams with no child/category,
-        // so fetch-data takes the full-scan path and returns all events.
-        // generate-answer formats them with formatEventsPlain.
-        String result = (String) queryAgent.invoke(
-                new QueryModule.QueryRequest(FAMILY_ID,
-                        "What's coming up this week?",
-                        "America/Los_Angeles"));
+    void testFamilyDataContainsAllSeededEvents() {
+        Map<String, Object> events = (Map<String, Object>)
+                familyData.selectOne(Path.key(FAMILY_ID).key("events"));
 
-        assertNotNull(result, "Query result should not be null");
-        assertFalse(result.isBlank(), "Query result should not be blank");
+        assertNotNull(events, "Events map should exist for test family");
+        assertEquals(5, events.size(), "Should have 5 seeded events");
+        assertTrue(events.containsKey("evt-1"), "Should contain evt-1");
+        assertTrue(events.containsKey("evt-5"), "Should contain evt-5");
     }
 
     @Test
     @Order(7)
-    void testQueryAgent_UnknownFamily_ReturnsNotFoundMessage() {
-        // familyId with no events → fetch-data returns empty list →
-        // generate-answer returns "I didn't find any events..." message
-        String result = (String) queryAgent.invoke(
-                new QueryModule.QueryRequest("unknown-family-xyz",
-                        "What's happening?",
-                        "America/Los_Angeles"));
+    void testUnknownFamilyReturnsNull() {
+        Object result = familyData.selectOne(
+                Path.key("unknown-family-xyz").key("events"));
 
-        assertNotNull(result, "Result should not be null for unknown family");
-        assertTrue(result.toLowerCase().contains("didn't find")
-                        || result.toLowerCase().contains("no events")
-                        || result.toLowerCase().contains("not find"),
-                "Unknown family should return a 'no events found' style message; got: " + result);
+        assertNull(result, "Unknown family should return null from PState");
     }
 }

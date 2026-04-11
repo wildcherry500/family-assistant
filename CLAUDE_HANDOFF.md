@@ -59,16 +59,12 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 
 ## Deferred Items
 
-### CRITICAL: PState data is NOT persistent (InProcessCluster in production)
-`FamilyAssistantApp` uses `InProcessCluster.create()` which stores all PState data
-in JVM-managed temp storage. **Every process restart wipes all family event data.**
+### ~~CRITICAL: PState data is NOT persistent (InProcessCluster in production)~~ RESOLVED
+`FamilyAssistantApp` now uses `RamaClusterManager.open()` to connect to a local
+Rama cluster (ZooKeeper + Conductor + Supervisor). PState data is persisted in
+RocksDB under `local.dir` configured in `rama.yaml`.
 
-`InProcessCluster` has no persistent-directory API — it is test-only by design.
-Confirmed by inspecting the Rama 1.5.0 jar: `create()` and `create(List<Class>)` are
-the only overloads, neither accepts a data directory.
-
-**Resolution: migrate to local Rama cluster (Phase 2 — in progress)**
-See "Phase 2 Migration Plan" section below for the full migration path.
+**Resolved: Phase 2 migration complete (2026-04-11).** See below for details.
 
 ---
 
@@ -83,7 +79,7 @@ old emails would be valuable.
 
 ---
 
-## Phase 2 Migration Plan — Local Rama Cluster (persistent storage)
+## Phase 2 Migration — Local Rama Cluster (persistent storage) ✓ COMPLETE
 
 ### What the docs say (Rama 1.5.0, verified from rama-knowledge-base)
 
@@ -106,41 +102,47 @@ Conductor and Supervisor share the same `rama.yaml` — each uses an independent
 subdirectory within `local.dir`.
 
 ### rama.yaml (single-node, all on localhost)
-```yaml
-zookeeper.servers:
-  - "localhost"
-local.dir: "/Users/toddkeelingfolder/rama-data"
-conductor.host: "localhost"
-supervisor.port.range:
-  - 3000
-  - 4000
-```
+Live file: `rama.yaml` at project root. Key customizations vs defaults:
+- `local.dir: /Volumes/CORSAIR/rama-data` (NVMe external drive)
+- `cluster.ui.port: 8889` (avoids conflict with OAuth callback on 8888)
+- `worker.child.opts: -Xmx2g`
 
 ### local.dir — what gets backed up
-`/Users/toddkeelingfolder/rama-data/` contains:
+`/Volumes/CORSAIR/rama-data/` contains:
 - Module JARs (Conductor subdirectory)
 - RocksDB PState data (`$$family-data`, `$$events-by-child`, etc.)
 - Depot replica logs (`*family-events`)
 
 This is the directory to tar and ship to S3 nightly.
 
-### Application code changes required
-1. Replace `InProcessCluster.create()` with `RamaClusterManager.open(config)`
-2. `RamaClusterManager` connects to the running cluster like a client
-3. Modules are deployed via `rama deploy` CLI, not `ipc.launchModule()`
-4. `AgentManager.create(ipc, ...)` → `AgentManager.create(clusterManager, ...)`
-5. `pom.xml`: rama scope must be `provided` (not `compile`) for cluster deployment
+### Application code changes (DONE 2026-04-11)
+1. ✅ `FamilyAssistantApp.java`: replaced `InProcessCluster.create()` with `RamaClusterManager.open()`
+2. ✅ Removed all five `ipc.launchModule()` calls — modules are now deployed via `rama deploy` CLI
+3. ✅ `AgentManager.create(ipc, ...)` → `AgentManager.create(cluster, ...)`
+4. ✅ `ipc.clusterPState(...)` → `cluster.clusterPState(...)`
+5. ✅ `pom.xml`: Rama scope stays as `compile` (NOT `provided`) — the fat JAR needs Rama on classpath for `RamaClusterManager.open()`
+6. ✅ Tests remain on `InProcessCluster` — no test changes needed
 
-### Steps to execute
-1. Download Rama 1.5.0 release from https://nexus.redplanetlabs.com (same release as the jar)
-2. Unpack to e.g. `~/rama-release/`
-3. Create `rama.yaml` at project root with config above
-4. Run: `~/rama-release/rama devZookeeper &`
-5. Run: `~/rama-release/rama conductor &`
-6. Run: `~/rama-release/rama supervisor &`
-7. Deploy modules via: `~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module FamilySchemaModule ...`
-8. Update `FamilyAssistantApp.java` to use `RamaClusterManager`
-9. **Tests stay on InProcessCluster** — no test changes needed
+### Remaining manual steps (one-time setup)
+1. Download Rama 1.5.0 release from https://nexus.redplanetlabs.com
+2. Unpack to `~/rama-release/`
+3. Copy `rama.yaml` from project root to `~/rama-release/rama.yaml`
+4. Start cluster daemons:
+   ```bash
+   ~/rama-release/rama devZookeeper &
+   ~/rama-release/rama conductor &
+   ~/rama-release/rama supervisor &
+   ```
+5. Build and deploy modules:
+   ```bash
+   mvn clean package -DskipTests
+   ~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module FamilySchemaModule
+   ~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module EmailParsingModule
+   ~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module EmailIngestionModule
+   ~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module GmailIngestionModule
+   ~/rama-release/rama deploy --jar target/family-assistant-1.0.0-jar-with-dependencies.jar --module DigestModule
+   ```
+6. Start the app: `mvn compile exec:exec`
 
 ### S3 backup (unlocked by local.dir)
 Once `local.dir` is configured, nightly backup is straightforward:

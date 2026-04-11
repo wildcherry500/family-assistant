@@ -1,9 +1,6 @@
 package com.family.assistant;
 
 import com.family.assistant.PersonalAssistantConfig;
-import com.family.assistant.digest.DigestModule;
-import com.family.assistant.email.EmailIngestionModule;
-import com.family.assistant.email.EmailParsingModule;
 import com.family.assistant.gmail.GmailIngestionModule;
 import com.family.assistant.gmail.GmailWatchSetup;
 import com.family.assistant.schema.FamilySchemaModule;
@@ -13,8 +10,7 @@ import com.rpl.agentorama.AgentClient;
 import com.rpl.agentorama.AgentManager;
 import com.rpl.rama.Path;
 import com.rpl.rama.PState;
-import com.rpl.rama.test.InProcessCluster;
-import com.rpl.rama.test.LaunchConfig;
+import com.rpl.rama.RamaClusterManager;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -35,8 +31,12 @@ import java.util.logging.Logger;
  *   4. GmailIngestionModule  — fetches Gmail INBOX → routes through EmailIngestionModule
  *   5. DigestModule          — mirrors $$family-data; answers digest queries
  *
+ * Prerequisites:
+ *   The Rama cluster (ZooKeeper + Conductor + Supervisor) must be running
+ *   and all modules must be deployed via `rama deploy` before starting this app.
+ *
  * Run with:
- *   mvn compile exec:java -Dexec.mainClass="com.family.assistant.FamilyAssistantApp"
+ *   mvn compile exec:exec
  *
  * Environment variables:
  *   GEMINI_API_KEY  — required for LLM-backed parsing and digest agents
@@ -61,36 +61,21 @@ public class FamilyAssistantApp {
             port = Integer.parseInt(portEnv.trim());
         }
 
-        System.out.println("[FamilyAssistantApp] Starting InProcessCluster...");
-        InProcessCluster ipc = InProcessCluster.create();
-
         // -----------------------------------------------------------------------
-        // Launch modules in dependency order
+        // Connect to the running Rama cluster
+        // Prereq: ZooKeeper, Conductor, and Supervisor must be running.
+        // Modules must already be deployed via `rama deploy`.
         // -----------------------------------------------------------------------
-        FamilySchemaModule schemaModule = new FamilySchemaModule();
-        ipc.launchModule(schemaModule, new LaunchConfig(1, 1));
-        System.out.println("[FamilyAssistantApp] Launched: " + schemaModule.getModuleName());
-
-        EmailParsingModule parsingModule = new EmailParsingModule();
-        ipc.launchModule(parsingModule, new LaunchConfig(1, 1));
-        System.out.println("[FamilyAssistantApp] Launched: " + parsingModule.getModuleName());
-
-        EmailIngestionModule ingestionModule = new EmailIngestionModule();
-        ipc.launchModule(ingestionModule, new LaunchConfig(1, 1));
-        System.out.println("[FamilyAssistantApp] Launched: " + ingestionModule.getModuleName());
-
-        GmailIngestionModule gmailModule = new GmailIngestionModule();
-        ipc.launchModule(gmailModule, new LaunchConfig(1, 1));
-        System.out.println("[FamilyAssistantApp] Launched: " + gmailModule.getModuleName());
-
-        DigestModule digestModule = new DigestModule();
-        ipc.launchModule(digestModule, new LaunchConfig(1, 1));
-        System.out.println("[FamilyAssistantApp] Launched: " + digestModule.getModuleName());
+        System.out.println("[FamilyAssistantApp] Connecting to Rama cluster...");
+        RamaClusterManager cluster = RamaClusterManager.open();
+        System.out.println("[FamilyAssistantApp] Connected. Deployed modules: "
+            + cluster.getDeployedModuleNames());
 
         // -----------------------------------------------------------------------
         // Wire AgentClient for gmail-ingestion-agent
         // -----------------------------------------------------------------------
-        AgentManager agentManager = AgentManager.create(ipc, gmailModule.getModuleName());
+        String gmailModuleName = new GmailIngestionModule().getModuleName();
+        AgentManager agentManager = AgentManager.create(cluster, gmailModuleName);
         AgentClient gmailIngestionClient = agentManager.getAgentClient("gmail-ingestion-agent");
         System.out.println("[FamilyAssistantApp] AgentClient ready: gmail-ingestion-agent");
 
@@ -104,7 +89,8 @@ public class FamilyAssistantApp {
         // Debug endpoint: GET /debug/pstate/{familyId}
         // Returns the full $$family-data entry for the given familyId as JSON.
         // -----------------------------------------------------------------------
-        PState familyData = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
+        String schemaModuleName = new FamilySchemaModule().getModuleName();
+        PState familyData = cluster.clusterPState(schemaModuleName, "$$family-data");
         ObjectMapper mapper = new ObjectMapper();
 
         // GET /debug/pstate/{familyId} — all events for a family
@@ -148,7 +134,7 @@ public class FamilyAssistantApp {
             System.out.println("[FamilyAssistantApp] Shutting down...");
             watchScheduler.shutdownNow();
             receiver.stop();
-            try { ipc.close(); } catch (Exception e) { /* best effort */ }
+            try { cluster.close(); } catch (Exception e) { /* best effort */ }
         }));
 
         System.out.println("[FamilyAssistantApp] Ready. Webhook listening on port " + port
