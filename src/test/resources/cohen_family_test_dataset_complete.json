@@ -1,0 +1,356 @@
+{
+  "metadata": {
+    "dataset_name": "Cohen Family Communication Test Dataset",
+    "version": "1.0",
+    "generated_date": "2026-02-11 01:36:29",
+    "period_start": "2026-02-10",
+    "period_end": "2026-03-02",
+    "total_days": 21,
+    "description": "Comprehensive realistic test dataset for family communication aggregation app testing"
+  },
+  "family_profile": {
+    "family_name": "Cohen",
+    "address": "6234 Latona Ave NE, Seattle, WA 98115",
+    "parents": [
+      {
+        "name": "Sarah Cohen",
+        "role": "Mother",
+        "age": 42,
+        "occupation": "Registered Nurse",
+        "employer": "Swedish Medical Center (Cherry Hill)",
+        "email": "sarah.cohen.rn@gmail.com",
+        "phone": "(206) 555-0142"
+      },
+      {
+        "name": "David Cohen",
+        "role": "Father",
+        "age": 44,
+        "occupation": "Operations Manager",
+        "employer": "Boeing (Renton facility)",
+        "email": "david.cohen.boeing@gmail.com",
+        "phone": "(206) 555-0143"
+      }
+    ],
+    "children": [
+      {
+        "name": "Maya Cohen",
+        "age": 8,
+        "grade": "3rd",
+        "school": "Green Lake Elementary",
+        "teacher": "Ms. Rachel Thompson",
+        "special_needs": "ADHD, IEP for reading support",
+        "activities": [
+          "Soccer (Green Lake Soccer Club U9)",
+          "Art classes (Gage Academy)"
+        ],
+        "email": "maya.cohen.student@seattleschools.org"
+      },
+      {
+        "name": "Josh Cohen",
+        "age": 17,
+        "grade": "12th (Senior)",
+        "school": "Roosevelt High School",
+        "activities": [
+          "Varsity Basketball",
+          "Concert Band (trumpet, first chair)",
+          "Private trumpet lessons"
+        ],
+        "college_apps": [
+          "UW",
+          "UCLA",
+          "UC Berkeley",
+          "Brandeis"
+        ],
+        "email": "josh.cohen.2026@seattleschools.org"
+      }
+    ],
+    "synagogue": "Congregation Beth Shalom (North Seattle)",
+    "observance": "Reform/Conservative, observes Shabbat and major holidays"
+  },
+  "communications": [
+    {
+      "message_id": "email_0001",
+      "timestamp": "2026-02-10T07:15:00-08:00",
+      "from": "Seattle Public Schools <communications@seattleschools.org>",
+      "to": "sarah.cohen.rn@gmail.com",
+      "subject": "Important: Mid-Winter Break Schedule Reminder",
+      "body": "Dear Seattle Public Schools Families,\n\nThis is a reminder that Mid-Winter Break is scheduled for February 17-21, 2026. All schools will be closed. Extended day programs will also be closed during this time.\n\nSchool resumes on Monday, February 24, 2026.\n\nBest regards,\nSeattle Public Schools Communications",
+      "channel": "email",
+      "source": "school_district",
+      "urgency": "medium",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Both",
+      "category": "administrative"
+    },
+    {
+      "message_id": "email_0002",
+      "timestamp": "2026-02-10T08:30:00-08:00",
+      "from": "Dr. Jennifer Martinez <jennifer.martinez@seattleschools.org>",
+      "to": "sarah.cohen.rn@gmail.com",
+      "subject": "Green Lake Elementary Weekly Newsletter - February 10",
+      "body": "Dear Green Lake Families,\n\nWelcome to a new week! Here are this week's highlights:\n\n\u2022 Parent-Teacher Conferences: Sign-ups are now open on our school website. Conferences will be held February 18-19 during Mid-Winter Break.\n\u2022 Science Fair: Projects are due March 3. Students should be working on their experiments at home.\n\u2022 Lost and Found: Please check the cafeteria for missing items. Unclaimed items will be donated on February 28.\n\u2022 Valentine's Day: Celebration on Friday, February 14. Students may bring valentines for classmates.\n\nHave a great week!\nDr. Jennifer Martinez, Principal\nGreen Lake Elementary",
+      "channel": "email",
+      "source": "school_elementary",
+      "urgency": "low",
+      "action_required": true,
+      "action_deadline": "2026-02-18T17:00:00-08:00",
+      "child": "Maya",
+      "category": "administrative"
+    },
+    {
+      "message_id": "email_0003",
+      "timestamp": "2026-02-10T09:15:00-08:00",
+      "from": "Ms. Rachel Thompson <rachel.thompson@seattleschools.org>",
+      "to": "sarah.cohen.rn@gmail.com",
+      "subject": "3rd Grade: This Week's Learning Goals",
+      "body": "Good morning 3rd grade families!\n\nThis week in class:\n\nREADING: We're starting a new chapter book, 'Charlotte's Web.' Please encourage your child to read 20 minutes each evening.\n\nMATH: Multiplication facts (6s, 7s, 8s). Practice at home with flashcards or online games.\n\nWRITING: Persuasive essay rough drafts due Thursday, February 13.\n\nSCIENCE: Plant life cycles - we'll be planting seeds on Wednesday!\n\nReminder: Valentine's Day party is Friday. Students may bring valentines for classmates (24 total). No food items please due to allergies.\n\nBest,\nMs. Rachel Thompson\n3rd Grade Teacher",
+      "channel": "email",
+      "source": "school_elementary",
+      "urgency": "low",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Maya",
+      "category": "academic"
+    },
+    {
+      "message_id": "email_0004",
+      "timestamp": "2026-02-10T10:45:00-08:00",
+      "from": "Mrs. Linda Patel <linda.patel@seattleschools.org>",
+      "to": "sarah.cohen.rn@gmail.com, david.cohen.boeing@gmail.com",
+      "subject": "URGENT: Maya Cohen IEP Annual Review Meeting - February 18",
+      "body": "Dear Mr. and Mrs. Cohen,\n\nThis email serves as official notice of Maya Cohen's Annual IEP Review Meeting.\n\nDATE: Tuesday, February 18, 2026\nTIME: 10:00 AM - 11:30 AM\nLOCATION: Green Lake Elementary, Conference Room B\n\nATTENDEES:\n- Parents (Sarah and David Cohen)\n- Special Education Coordinator (Linda Patel)\n- General Education Teacher (Rachel Thompson)\n- Resource Teacher (James Kim)\n- School Psychologist (Dr. Emily Warren)\n\nWe will review Maya's progress on her current IEP goals, discuss assessment results, and develop goals for the upcoming year. Please review the attached draft IEP prior to the meeting.\n\nIf you cannot attend, please contact me immediately at (206) 555-0198 to reschedule. Both parents' participation is strongly encouraged.\n\nSincerely,\nLinda Patel, M.Ed.\nSpecial Education Coordinator\nGreen Lake Elementary",
+      "channel": "email",
+      "source": "school_elementary",
+      "urgency": "critical",
+      "action_required": true,
+      "action_deadline": "2026-02-18T10:00:00-08:00",
+      "child": "Maya",
+      "category": "administrative"
+    },
+    {
+      "message_id": "email_0005",
+      "timestamp": "2026-02-10T11:20:00-08:00",
+      "from": "Ms. Laura Bennett <laura.bennett@seattleschools.org>",
+      "to": "david.cohen.boeing@gmail.com",
+      "subject": "Class of 2026: Important Graduation Deadlines",
+      "body": "Dear Senior Families,\n\nAs we approach the second semester, here are critical deadlines for graduation:\n\n\u2022 February 28: Senior portraits due for yearbook\n\u2022 March 15: Cap and gown orders (Jostens)\n\u2022 April 1: Grad Night permission slips and payment ($75)\n\u2022 May 1: Senior awards nomination forms\n\u2022 June 10: Graduation ceremony (Memorial Stadium, 7:00 PM)\n\nREMINDER: All seniors must have completed 24 credits and passed the state assessment to graduate. Check Skyward to verify your student's credit status.\n\nCollege-bound students: Don't forget to send final transcripts to your chosen university after acceptance.\n\nGo Roughriders!\nLaura Bennett\nSenior Class Advisor",
+      "channel": "email",
+      "source": "school_high",
+      "urgency": "medium",
+      "action_required": true,
+      "action_deadline": "2026-02-28T17:00:00-08:00",
+      "child": "Josh",
+      "category": "administrative"
+    },
+    {
+      "message_id": "email_0006",
+      "timestamp": "2026-02-10T14:30:00-08:00",
+      "from": "Coach Marcus Johnson <marcus.johnson@seattleschools.org>",
+      "to": "Roosevelt Basketball Parents <basketball-parents@rooseveltathletics.org>",
+      "subject": "This Week's Basketball Schedule + Important Team Dinner Info",
+      "body": "Roughrider Basketball Families,\n\nHere's this week's schedule:\n\nMONDAY 2/10: Practice 3:30-5:30 PM (gym)\nWEDNESDAY 2/12: HOME GAME vs. Garfield High, 7:00 PM tip-off\n  - Senior Night recognition at 6:45 PM\n  - Parents please arrive by 6:30 PM for photos\nFRIDAY 2/14: Practice 3:30-5:00 PM (gym)\n\nTEAM DINNER: Wednesday before the game, 5:00 PM at Pagliacci Pizza (University Village). Please RSVP to team mom Jennifer by Tuesday.\n\nSENIOR NIGHT: This is a big deal for our seniors! We'll be recognizing Josh Cohen, Marcus Williams, and Tyler Anderson. Parents, please bring flowers and be ready for photos on the court.\n\nLet's pack the gym and support our Roughriders!\n\nCoach Marcus Johnson\nVarsity Basketball",
+      "channel": "email",
+      "source": "sports",
+      "urgency": "high",
+      "action_required": true,
+      "action_deadline": "2026-02-12T17:00:00-08:00",
+      "child": "Josh",
+      "category": "sports"
+    },
+    {
+      "message_id": "whatsapp_0007",
+      "timestamp": "2026-02-10T15:42:00-08:00",
+      "group_name": "Green Lake 3rd Grade Parents",
+      "sender": "Jennifer Park (Room Parent)",
+      "message": "Hi everyone! Quick reminder that Valentine's Day is this Friday. Ms. Thompson said no food items due to allergies. Stickers, pencils, or small toys are great alternatives! \ud83d\udc9d",
+      "channel": "whatsapp",
+      "urgency": "low",
+      "child": "Maya"
+    },
+    {
+      "message_id": "whatsapp_0008",
+      "timestamp": "2026-02-10T16:15:00-08:00",
+      "group_name": "Roosevelt Senior Parents 2026",
+      "sender": "Karen Mitchell (PTSA)",
+      "message": "Parents! Senior Night for basketball is Wednesday. If your child is being recognized, please arrive by 6:30 PM for photos. Bring flowers! \ud83c\udfc0\ud83c\udf39",
+      "channel": "whatsapp",
+      "urgency": "high",
+      "child": "Josh"
+    },
+    {
+      "message_id": "email_0009",
+      "timestamp": "2026-02-10T17:22:00-08:00",
+      "from": "Linda Thompson <linda.thompson@swedish.org>",
+      "to": "sarah.cohen.rn@gmail.com",
+      "subject": "Schedule Update: Shift Swap Request",
+      "body": "Hi Sarah,\n\nJenna Martinez is requesting to swap her Thursday 2/13 day shift (7am-7pm) for your Friday 2/14 evening shift (7pm-7am). Are you available to make this swap?\n\nPlease confirm by end of day Tuesday so I can update the schedule.\n\nThanks,\nLinda Thompson\nNurse Manager, Med-Surg Unit\nSwedish Medical Center",
+      "channel": "email",
+      "source": "work",
+      "urgency": "medium",
+      "action_required": true,
+      "action_deadline": "2026-02-12T17:00:00-08:00",
+      "child": "None",
+      "category": "work"
+    },
+    {
+      "message_id": "email_0010",
+      "timestamp": "2026-02-10T18:00:00-08:00",
+      "from": "Rabbi Sarah Goldstein <rabbi@bethshalomseattle.org>",
+      "to": "Congregation Beth Shalom Families",
+      "subject": "Shabbat Shalom - This Week at Beth Shalom",
+      "body": "Dear Friends,\n\nShabbat Shalom! Join us this week:\n\nFRIDAY EVENING:\n6:30 PM - Kabbalat Shabbat service\n7:30 PM - Oneg Shabbat (dessert reception)\n\nSATURDAY MORNING:\n10:00 AM - Shabbat morning service\n11:30 AM - Kiddush lunch\n\nThis week's Torah portion is Mishpatim (Exodus 21:1-24:18), which deals with laws of justice and compassion.\n\nSUNDAY:\nHebrew School resumes 9:30 AM - 12:00 PM\n\nWarm regards,\nRabbi Sarah Goldstein\nCongregation Beth Shalom",
+      "channel": "email",
+      "source": "synagogue",
+      "urgency": "low",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Both",
+      "category": "religious"
+    },
+    {
+      "message_id": "calendar_0011",
+      "event_id": "cal_011",
+      "title": "Maya Cohen - Annual IEP Review Meeting",
+      "start_time": "2026-02-18T10:00:00-08:00",
+      "end_time": "2026-02-18T11:30:00-08:00",
+      "location": "Green Lake Elementary, Conference Room B",
+      "description": "Annual IEP review for Maya. Attendees: Parents, Special Ed Coordinator, Teachers, School Psychologist. Review progress and set new goals for the upcoming year.",
+      "organizer": "Linda Patel <linda.patel@seattleschools.org>",
+      "attendees": [
+        "sarah.cohen.rn@gmail.com",
+        "david.cohen.boeing@gmail.com"
+      ],
+      "channel": "calendar",
+      "source": "school_elementary",
+      "child": "Maya",
+      "urgency": "critical"
+    },
+    {
+      "message_id": "whatsapp_0012",
+      "timestamp": "2026-02-11T08:15:00-08:00",
+      "group_name": "Green Lake Soccer U9 Team Parents",
+      "sender": "Coach Emily Rodriguez",
+      "message": "Good morning! Practice today at 5:30 PM at Green Lake Park (lower field). Please bring water bottles and shin guards. We'll be working on passing drills. \u26bd",
+      "channel": "whatsapp",
+      "urgency": "medium",
+      "child": "Maya"
+    },
+    {
+      "message_id": "email_0013",
+      "timestamp": "2026-02-11T09:45:00-08:00",
+      "from": "Jennifer Park <jpark.greenlake.pta@gmail.com>",
+      "to": "Green Lake PTA Members",
+      "subject": "Volunteers Needed: Science Fair Setup (March 2)",
+      "body": "Dear PTA Members,\n\nOur annual Science Fair is coming up on March 3, and we need volunteers to help with setup on March 2 (evening, 6-8 PM).\n\nTasks include:\n- Setting up display tables in the gym\n- Hanging banners and decorations\n- Organizing judging materials\n\nPlease sign up here: [SignUpGenius link]\n\nThank you for supporting our students!\n\nJennifer Park\nPTA President, Green Lake Elementary",
+      "channel": "email",
+      "source": "pta",
+      "urgency": "low",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Maya",
+      "category": "social"
+    },
+    {
+      "message_id": "email_0014",
+      "timestamp": "2026-02-11T11:30:00-08:00",
+      "from": "Mr. Thomas Anderson <thomas.anderson@seattleschools.org>",
+      "to": "Roosevelt Band Parents",
+      "subject": "Winter Concert Reminder - February 20 + Dress Rehearsal",
+      "body": "Dear Band Families,\n\nOur Winter Concert is coming up!\n\nDRESS REHEARSAL: Wednesday, February 19, 3:30-5:30 PM (mandatory)\nCONCERT: Thursday, February 20, 7:00 PM (Roosevelt Auditorium)\n\nDRESS CODE:\n- Black pants or skirt\n- White dress shirt\n- Black dress shoes\n- Band t-shirt will be provided\n\nStudents should arrive by 6:30 PM on concert night. Doors open to audience at 6:45 PM.\n\nTickets are not required, but donations are appreciated. Suggested donation: $5 per person.\n\nLooking forward to a great performance!\n\nThomas Anderson\nBand Director, Roosevelt High School",
+      "channel": "email",
+      "source": "school_high",
+      "urgency": "medium",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Josh",
+      "category": "academic"
+    },
+    {
+      "message_id": "email_0015",
+      "timestamp": "2026-02-11T13:20:00-08:00",
+      "from": "Dr. Elena Martinez <elena.martinez@seattlesymphony.org>",
+      "to": "david.cohen.boeing@gmail.com",
+      "subject": "Josh's Lesson Today - 4:30 PM",
+      "body": "Hi David,\n\nJust confirming Josh's trumpet lesson today at 4:30 PM at my studio (Benaroya Hall, Room 305).\n\nThis week we'll be working on the solo piece for his spring recital - the Haydn Trumpet Concerto. Please make sure Josh brings his mute and the sheet music.\n\nSee you this afternoon!\n\nDr. Elena Martinez\nSeattle Symphony, Principal Trumpet",
+      "channel": "email",
+      "source": "private_lessons",
+      "urgency": "medium",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Josh",
+      "category": "academic"
+    },
+    {
+      "message_id": "whatsapp_0016",
+      "timestamp": "2026-02-11T14:52:00-08:00",
+      "group_name": "Roosevelt Basketball Parents",
+      "sender": "Jennifer (Team Mom)",
+      "message": "Hi everyone! Please RSVP for tomorrow's team dinner at Pagliacci (5 PM). I need a headcount by tonight. Reply here or text me directly. Thanks! \ud83c\udf55",
+      "channel": "whatsapp",
+      "urgency": "high",
+      "child": "Josh"
+    },
+    {
+      "message_id": "email_0017",
+      "timestamp": "2026-02-11T15:40:00-08:00",
+      "from": "Tom Harrison <tom.harrison@boeing.com>",
+      "to": "david.cohen.boeing@gmail.com",
+      "subject": "Travel Approval: Everett Site Visit - February 26-27",
+      "body": "David,\n\nYour travel request for the Everett facility visit has been approved.\n\nDATES: February 26-27, 2026\nPURPOSE: Operations review and Q1 planning meeting\nHOTEL: Courtyard Marriott Everett (booked)\nRENTAL CAR: Enterprise (confirmation sent separately)\n\nPlease submit your expense report within 5 business days of return.\n\nLet me know if you need anything else.\n\nTom Harrison\nDirector, Operations\nBoeing Commercial Airplanes",
+      "channel": "email",
+      "source": "work",
+      "urgency": "medium",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "None",
+      "category": "work"
+    },
+    {
+      "message_id": "email_0018",
+      "timestamp": "2026-02-11T19:15:00-08:00",
+      "from": "Rachel Levine <rachel.levine@bethshalomseattle.org>",
+      "to": "Hebrew School Parents",
+      "subject": "Hebrew School This Sunday - Purim Planning!",
+      "body": "Dear Hebrew School Families,\n\nThis Sunday, February 16, we'll be preparing for Purim! Classes will focus on the Megillah story and students will start working on costumes.\n\nPurim Carnival: Sunday, March 9, 2:00-4:00 PM\n- Costume contest\n- Games and activities\n- Hamantaschen baking\n- Megillah reading\n\nPlease mark your calendars! More details to come.\n\nL'Shalom,\nRachel Levine\nHebrew School Principal",
+      "channel": "email",
+      "source": "synagogue",
+      "urgency": "low",
+      "action_required": false,
+      "action_deadline": null,
+      "child": "Maya",
+      "category": "religious"
+    }
+  ],
+  "statistics": {
+    "total_communications": 18,
+    "by_channel": {
+      "email": 13,
+      "whatsapp": 4,
+      "calendar": 1
+    },
+    "by_child": {
+      "Maya": 8,
+      "Josh": 6,
+      "Both": 2,
+      "None": 2
+    },
+    "by_urgency": {
+      "critical": 2,
+      "high": 3,
+      "medium": 7,
+      "low": 6
+    },
+    "by_source": {
+      "school_district": 1,
+      "school_elementary": 4,
+      "unknown": 4,
+      "pta": 1,
+      "synagogue": 2,
+      "work": 2,
+      "school_high": 2,
+      "private_lessons": 1,
+      "sports": 1
+    }
+  }
+}
