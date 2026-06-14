@@ -41,3 +41,10 @@ build/
 credentials.json
 tokens/
 *.tokens/
+
+### Runtime artifacts ###
+hs_err_pid*.log
+local-zk/
+logs/
+height,
+width,

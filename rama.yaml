@@ -16,6 +16,9 @@ local.dir: "/Volumes/CORSAIR/rama-data"
 
 conductor.host: "localhost"
 
+conductor.assignment.mode:
+  type: dev
+
 supervisor.port.range:
   - 3000
   - 4000
