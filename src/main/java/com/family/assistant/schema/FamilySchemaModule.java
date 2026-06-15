@@ -7,23 +7,36 @@ import com.rpl.rama.PState;
 import com.rpl.rama.Path;
 import com.rpl.rama.RamaModule;
 
+import java.util.Map;
+
 /**
  * FamilySchemaModule
  *
  * Plain RamaModule — owns the $$family-data PState and *family-events depot.
  * Other modules append to *family-events via getMirrorDepot(); the stream
- * topology drains it into $$family-data and two inverted indexes.
+ * topology drains it into $$family-data and the inverted indexes.
  *
  * Schema:
  *   $$family-data        — familyId -> { "events" -> { eventId -> { ...record... } } }
  *   $$events-by-child    — familyId -> childName  -> Set<eventId>
  *   $$events-by-category — familyId -> eventType  -> Set<eventId>
+ *   $$events-by-account  — familyId -> accountLabel -> Set<eventId>
+ *   $$events-by-date     — familyId -> epochMs (sorted) -> Set<eventId>
  */
 public class FamilySchemaModule implements RamaModule, java.io.Serializable {
 
     /** Returns true when a String is non-null and non-blank. */
     private static boolean isPresent(String s) {
         return s != null && !s.isBlank();
+    }
+
+    /** Returns startTime if set, deadline if set, or null if neither is present. */
+    private static Long effectiveTime(Map<String, Object> record) {
+        Object st = record.get("startTime");
+        if (st instanceof Long) return (Long) st;
+        Object dl = record.get("deadline");
+        if (dl instanceof Long) return (Long) dl;
+        return null;
     }
 
     @Override
@@ -61,6 +74,13 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
+        // Sorted date index: familyId -> epochMs -> Set<eventId>
+        stream.pstate("$$events-by-date",
+            PState.mapSchema(String.class,
+                PState.mapSchema(Long.class,
+                    PState.setSchema(String.class)
+                ).subindexed()));
+
         stream.source("*family-events").out("*record")
           .select("*record", Path.key("familyId")).out("*familyId")
           .select("*record", Path.key("id")).out("*eventId")
@@ -83,6 +103,14 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .select("*record", Path.key("accountLabel")).out("*accountLabel")
           .ifTrue(new Expr(FamilySchemaModule::isPresent, "*accountLabel"),
               Block.localTransform("$$events-by-account",
-                  Path.key("*familyId").key("*accountLabel").nullToSet().voidSetElem().termVal("*eventId")));
+                  Path.key("*familyId").key("*accountLabel").nullToSet().voidSetElem().termVal("*eventId")))
+          // Compute effective time (startTime ?? deadline) and write sorted date index
+          .select("*record", Path.key("startTime")).out("*startTime")
+          .select("*record", Path.key("deadline")).out("*deadline")
+          .macro(Block.each(FamilySchemaModule::effectiveTime, "*record").out("*epochMs"))
+          .ifTrue(new Expr((Long t) -> t != null, "*epochMs"),
+              Block.localTransform("$$events-by-date",
+                  Path.key("*familyId").key("*epochMs")
+                      .nullToSet().voidSetElem().termVal("*eventId")));
     }
 }
