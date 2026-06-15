@@ -4,14 +4,18 @@
 
 | Module | Class | Package | Purpose |
 |---|---|---|---|
-| FamilySchemaModule | `FamilySchemaModule` | `com.family.assistant.schema` | Owns `$$family-data` PState and `*family-events` depot |
+| FamilySchemaModule | `FamilySchemaModule` | `com.family.assistant.schema` | Owns `$$family-data` PState, `*family-events` depot, and all indexes |
 | EmailParsingModule | `EmailParsingModule` | `com.family.assistant.email` | Parses raw email → appends to `*family-events` depot |
+| EmailIngestionModule | `EmailIngestionModule` | `com.family.assistant.email` | Batch fan-out to EmailParsingModule |
+| GmailIngestionModule | `GmailIngestionModule` | `com.family.assistant.gmail` | Fetches unread Gmail, deduplicates, routes to EmailIngestionModule |
 | DigestModule | `DigestModule` | `com.family.assistant.digest` | Reads `$$family-data` mirror store → returns digest string |
+| QueryModule | `QueryModule` | `com.family.assistant.query` | LLM-powered natural language query over PState indexes |
 
 ## Current Build Status
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
-- Do NOT compile from `/Volumes/CORSAIR/family-assistant/` — no `pom.xml` there.
+- Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
+- **78/78 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
 
 ## GCP Project Situation (IMPORTANT)
 
@@ -51,6 +55,76 @@ Re-grant IAM (single line — no backslash continuations in zsh):
 ```bash
 gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=family-assistant-dev-490204 --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" --role="roles/pubsub.publisher"
 ```
+
+## PState Schema (FamilySchemaModule)
+
+| PState | Key path | Value | Notes |
+|---|---|---|---|
+| `$$family-data` | `familyId -> "events" -> eventId` | `Map<String, Object>` record | Primary store |
+| `$$events-by-child` | `familyId -> childName` | `Set<eventId>` | Null/blank childName not indexed |
+| `$$events-by-category` | `familyId -> eventType` | `Set<eventId>` | Null/blank eventType not indexed |
+| `$$events-by-account` | `familyId -> accountLabel` | `Set<eventId>` | Null/blank accountLabel not indexed |
+| `$$events-by-date` | `familyId -> epochMs` (subindexed) | `Set<eventId>` | effectiveTime = startTime ?? deadline; null excluded |
+
+### $$events-by-date — Rama 1.5.0 API notes (verified by testing)
+
+**Range query (returns `List<String>` of individual eventIds):**
+```java
+List<String> ids = (List<String>)(List<?>) eventsByDate.select(
+    Path.key(familyId).sortedMapRange(startMs, endMs).mapVals().all());
+```
+
+**Single-bucket lookup:**
+```java
+Set<String> bucket = (Set<String>) eventsByDate.selectOne(Path.key(familyId).key(epochMs));
+```
+
+**DO NOT use** `selectOne(Path.key(familyId))` on a subindexed PState — returns raw `RocksDBWrapper` (not serializable). Use a wide range query `(0L, Long.MAX_VALUE)` for full-index assertions.
+
+**Write path in stream topology:**
+```java
+Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
+```
+
+### Event record fields (stored in $$family-data)
+
+| Field | Type | Source |
+|---|---|---|
+| `id` | String | gmailMessageId or generated UUID |
+| `familyId` | String | partition key |
+| `title` | String | email subject / LLM-extracted |
+| `description` | String | email body |
+| `eventType` | String | SCHOOL_EVENT, DEADLINE, PERMISSION_SLIP, TASK, UNKNOWN |
+| `childName` | String | LLM-extracted or mapped from JSON |
+| `childId` | String | childName.toLowerCase() |
+| `startTime` | Long | epoch ms |
+| `deadline` | Long | epoch ms |
+| `urgency` | String | critical, high, medium, low |
+| `status` | String | pending, completed |
+| `sourceType` | String | email, test |
+| `accountLabel` | String | Gmail account label |
+| `created` / `updated` | Long | epoch ms |
+
+---
+
+## Test Suite (78 tests, all non-LLM)
+
+| Test class | Tests | What it covers |
+|---|---|---|
+| `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
+| `CohenFamilyDatasetTest` | 19 | Real 21-day dataset (13 email records), all indexes |
+| `IndexPStateTest` | 13 | Child/category index correctness |
+| `AccountLabelTest` | 8 | `$$events-by-account` index + DigestModule account filtering |
+| `QueryIndexTest` | 7 | `$$events-by-child` and `$$events-by-category` range assertions |
+| `DateIndexTest` | 6 | `$$events-by-date` range queries, effectiveTime logic |
+| `EmailIngestionTest` | 2 | Batch fan-out, blank/null filtering |
+| `FamilyAssistantTest` | 2 | Schema module + depot smoke test |
+| `GmailIngestionTest` | 1 | Live Gmail fetch (skips gracefully if no unread) |
+
+### Test resources
+- `src/test/resources/cohen_family_test_dataset_complete.json` — Cohen family 21-day dataset (18 messages: Feb 10–Mar 2, 2026)
+
+---
 
 ## Checkpoint Behavior (2026-03-28)
 - The "checkpoint at 10% context" instruction is **manual only** — no hook is configured
