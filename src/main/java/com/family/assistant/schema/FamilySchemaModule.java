@@ -110,7 +110,7 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .macro(Block.each(FamilySchemaModule::effectiveTime, "*record").out("*epochMs"))
           .ifTrue(new Expr((Long t) -> t != null, "*epochMs"),
               Block.localTransform("$$events-by-date",
-                  Path.key("*familyId").key("*epochMs")
+                  Path.key("*familyId", "*epochMs")
                       .nullToSet().voidSetElem().termVal("*eventId")));
     }
 }

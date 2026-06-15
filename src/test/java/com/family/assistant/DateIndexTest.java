@@ -16,10 +16,17 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * DateIndexTest
  *
- * Verifies that FamilySchemaModule correctly populates $$events-by-date
- * using effectiveTime (startTime ?? deadline) and that range queries work.
+ * Verifies $$events-by-date populated correctly by FamilySchemaModule.
  *
- * No GEMINI_API_KEY required — direct depot append + PState read only.
+ * Range queries (confirmed API):
+ *   select(Path.key(familyId).sortedMapRange(start, end).mapVals().all())
+ *   returns List<String> of individual eventIds — one per set member per bucket.
+ *
+ * NOTE: selectOne(Path.key(familyId)) does NOT work on subindexed PStates.
+ * It returns the raw RocksDBWrapper object which cannot be serialized.
+ * Use wide range queries (0L, Long.MAX_VALUE) for full-index assertions.
+ *
+ * No GEMINI_API_KEY required.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -50,9 +57,9 @@ public class DateIndexTest {
         appendEvent("evt-d1", MAR_15, null);
         // evt-d2: startTime=MAR_20, no deadline
         appendEvent("evt-d2", MAR_20, null);
-        // evt-d3: no startTime, deadline=APR_01 — effectiveTime falls back to deadline
+        // evt-d3: no startTime, deadline=APR_01 -- effectiveTime falls back to deadline
         appendEvent("evt-d3", null, APR_01);
-        // evt-d4: both null — must NOT appear in $$events-by-date
+        // evt-d4: both null -- must NOT appear in $$events-by-date
         appendEvent("evt-d4", null, null);
 
         Thread.sleep(2000);
@@ -81,28 +88,23 @@ public class DateIndexTest {
         familyEventsDepot.append(record);
     }
 
-    /**
-     * Queries $$events-by-date for the given family and time range [startInclusive, endExclusive).
-     * Uses selectOne to retrieve the range sub-map, then flattens all Set<String> values.
-     */
+    // Confirmed API: select() with .mapVals().all() returns List<String> of individual eventIds
     @SuppressWarnings("unchecked")
-    private Set<String> rangeQuery(long startInclusive, long endExclusive) {
-        Map<Long, Set<String>> rangeMap = (Map<Long, Set<String>>) eventsByDate.selectOne(
-            Path.key(FAMILY_ID).sortedMapRange(startInclusive, endExclusive));
-        Set<String> ids = new HashSet<>();
-        if (rangeMap != null) {
-            rangeMap.values().forEach(ids::addAll);
-        }
-        return ids;
+    private List<String> rangeQuery(long startMs, long endMs) {
+        Path rangePath = Path.key(FAMILY_ID)
+            .sortedMapRange(startMs, endMs)
+            .mapVals()
+            .all();
+        return (List<String>) (List<?>) eventsByDate.select(rangePath);
     }
 
     // =========================================================================
-    // Range query [MAR_15, MAR_25) — should include MAR_15 and MAR_20 only
+    // Range query [MAR_15, MAR_25) -- should include MAR_15 and MAR_20 only
     // =========================================================================
 
     @Test @Order(1)
     void testRangeQueryReturnsMar15AndMar20() {
-        Set<String> eventIds = rangeQuery(MAR_15, MAR_25);
+        List<String> eventIds = rangeQuery(MAR_15, MAR_25);
 
         assertFalse(eventIds.isEmpty(), "Range [MAR_15, MAR_25) should return results");
         assertTrue(eventIds.contains("evt-d1"),
@@ -117,7 +119,7 @@ public class DateIndexTest {
 
     @Test @Order(2)
     void testRangeQueryExcludesMar25Exactly() {
-        Set<String> eventIds = rangeQuery(MAR_15, MAR_25);
+        List<String> eventIds = rangeQuery(MAR_15, MAR_25);
 
         assertEquals(2, eventIds.size(),
             "Range [MAR_15, MAR_25) should contain exactly 2 event IDs: evt-d1 and evt-d2");
@@ -129,26 +131,25 @@ public class DateIndexTest {
 
     @Test @Order(3)
     void testNullTimeEventAbsentFromIndex() {
-        // Wide range covering all valid ms timestamps — evt-d4 must still not appear
-        Set<String> allIndexedIds = rangeQuery(0L, Long.MAX_VALUE);
+        // Wide range covers all realistic epoch-ms timestamps
+        List<String> allIndexedIds = rangeQuery(0L, Long.MAX_VALUE);
 
         assertFalse(allIndexedIds.contains("evt-d4"),
             "evt-d4 (null startTime and null deadline) must not appear in $$events-by-date");
     }
 
     // =========================================================================
-    // APR_01 event (deadline-only) is indexed at the correct epochMs
+    // APR_01 event (deadline-only) indexed at deadline time
     // =========================================================================
 
     @Test @Order(4)
     @SuppressWarnings("unchecked")
     void testDeadlineOnlyEventIndexedAtDeadlineTime() {
-        // evt-d3 has no startTime but deadline=APR_01 — effectiveTime should use deadline
         Set<String> apr01Bucket = (Set<String>)
             eventsByDate.selectOne(Path.key(FAMILY_ID).key(APR_01));
 
         assertNotNull(apr01Bucket,
-            "APR_01 bucket should exist — evt-d3 uses deadline as effectiveTime");
+            "APR_01 bucket should exist -- evt-d3 uses deadline as effectiveTime");
         assertTrue(apr01Bucket.contains("evt-d3"),
             "evt-d3 should be indexed at APR_01 (its deadline)");
     }
@@ -156,7 +157,6 @@ public class DateIndexTest {
     @Test @Order(5)
     @SuppressWarnings("unchecked")
     void testStartTimeTakesPriorityOverDeadline() {
-        // evt-d1 has startTime=MAR_15 (and no deadline) — must be at MAR_15 bucket
         Set<String> mar15Bucket = (Set<String>)
             eventsByDate.selectOne(Path.key(FAMILY_ID).key(MAR_15));
 
@@ -171,8 +171,7 @@ public class DateIndexTest {
 
     @Test @Order(6)
     void testTotalIndexedEventCount() {
-        // Wide range: all positive epoch-ms values cover all realistic timestamps
-        Set<String> allIds = rangeQuery(0L, Long.MAX_VALUE);
+        List<String> allIds = rangeQuery(0L, Long.MAX_VALUE);
 
         assertEquals(3, allIds.size(),
             "3 of 4 seeded events have a non-null effectiveTime and should appear in $$events-by-date");
