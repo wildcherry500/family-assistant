@@ -131,6 +131,12 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 - When user says "checkpoint": update this file, then `git add -A && git commit -m "checkpoint" && git push origin master`
 - No automated hook exists in `~/.claude/settings.json` or project `settings.local.json` for this
 
+## Next Task
+
+**SearchIndexModule** — full-text / keyword search index over event titles and descriptions, backed by a new PState in FamilySchemaModule. Prompt and design details to be provided at session start.
+
+---
+
 ## Deferred Items
 
 ### ~~CRITICAL: PState data is NOT persistent (InProcessCluster in production)~~ RESOLVED
