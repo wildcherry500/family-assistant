@@ -1,5 +1,7 @@
 package com.family.assistant.query;
 
+import static com.family.assistant.util.EventUtils.*;
+
 import com.rpl.agentorama.AgentModule;
 import com.rpl.agentorama.AgentNode;
 import com.rpl.agentorama.AgentTopology;
@@ -186,79 +188,74 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                         "FamilySchemaModule", "$$events-by-child");
                     PStateStore psCategory = agentNode.getMirrorStore(
                         "FamilySchemaModule", "$$events-by-category");
+                    PStateStore psDate = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$events-by-date");
 
-                    List<Map<String, Object>> candidates = new ArrayList<>();
+                    // Collect candidate event IDs from applicable indexes
+                    Set<String> candidateIds = null;
+                    boolean hasDateRange = params.dateFrom != null || params.dateTo != null;
 
-                    if (params.childName != null || params.categoryFilter != null) {
-                        // ---------------------------------------------------
+                    // Date index lookup
+                    if (hasDateRange) {
+                        long fromMs = parseToEpoch(params.dateFrom, Long.MIN_VALUE);
+                        long toMs   = parseToEpoch(params.dateTo,   Long.MAX_VALUE);
+                        @SuppressWarnings("unchecked")
+                        List<String> dateIds = (List<String>) (List<?>) psDate.select(
+                            Path.key(params.familyId)
+                                .sortedMapRange(fromMs, toMs)
+                                .mapVals().all());
+                        candidateIds = dateIds != null
+                            ? new HashSet<>(dateIds) : new HashSet<>();
+                    }
+
+                    // Child index lookup
+                    if (params.childName != null) {
+                        @SuppressWarnings("unchecked")
+                        Set<String> childSet = (Set<String>)
+                            psChild.selectOne(Path.key(params.familyId)
+                                                 .key(params.childName));
+                        Set<String> resolved = childSet != null
+                            ? new HashSet<>(childSet) : new HashSet<>();
+                        candidateIds = candidateIds != null
+                            ? intersect(candidateIds, resolved) : resolved;
+                    }
+
+                    // Category index lookup
+                    if (params.categoryFilter != null) {
+                        @SuppressWarnings("unchecked")
+                        Set<String> catSet = (Set<String>)
+                            psCategory.selectOne(Path.key(params.familyId)
+                                                    .key(params.categoryFilter));
+                        Set<String> resolved = catSet != null
+                            ? new HashSet<>(catSet) : new HashSet<>();
+                        candidateIds = candidateIds != null
+                            ? intersect(candidateIds, resolved) : resolved;
+                    }
+
+                    // Fetch full records
+                    List<Map<String, Object>> matched = new ArrayList<>();
+                    if (candidateIds != null) {
                         // Index-assisted path
-                        // ---------------------------------------------------
-                        Set<String> candidateIds = null;
-
-                        if (params.childName != null) {
-                            // TODO: normalize case — index keys use the exact childName
-                            // stored in the event record (e.g. "Billy"), so lookup is
-                            // case-sensitive for now.  A future enhancement should
-                            // store index keys in lower-case and compare lower-cased.
-                            Set<String> childSet = (Set<String>)
-                                psChild.selectOne(Path.key(params.familyId)
-                                                     .key(params.childName));
-                            candidateIds = childSet != null
-                                ? new HashSet<>(childSet)
-                                : new HashSet<>();
-                        }
-
-                        if (params.categoryFilter != null) {
-                            Set<String> catSet = (Set<String>)
-                                psCategory.selectOne(Path.key(params.familyId)
-                                                        .key(params.categoryFilter));
-                            if (candidateIds == null) {
-                                candidateIds = catSet != null
-                                    ? new HashSet<>(catSet)
-                                    : new HashSet<>();
-                            } else {
-                                candidateIds.retainAll(
-                                    catSet != null ? catSet : new HashSet<>());
-                            }
-                        }
-
-                        // Fetch full event records for each candidate ID
-                        if (candidateIds != null) {
-                            for (String eventId : candidateIds) {
-                                Map<String, Object> event = (Map<String, Object>)
-                                    psMain.selectOne(Path.key(params.familyId)
-                                                        .key("events")
-                                                        .key(eventId));
-                                if (event != null) {
-                                    candidates.add(event);
-                                }
+                        for (String eventId : candidateIds) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> event = (Map<String, Object>)
+                                psMain.selectOne(Path.key(params.familyId)
+                                                    .key("events").key(eventId));
+                            if (event != null) {
+                                matched.add(event);
                             }
                         }
                     } else {
-                        // ---------------------------------------------------
-                        // No index-applicable filters — full scan as before
-                        // ---------------------------------------------------
+                        // No filters — full scan
+                        @SuppressWarnings("unchecked")
                         Map<String, Object> allEvents = (Map<String, Object>)
                             psMain.selectOne(Path.key(params.familyId).key("events"));
-
                         if (allEvents != null) {
                             for (Object val : allEvents.values()) {
-                                candidates.add((Map<String, Object>) val);
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> event = (Map<String, Object>) val;
+                                matched.add(event);
                             }
-                        }
-                    }
-
-                    // Apply date filter in memory (no date index exists yet)
-                    List<Map<String, Object>> matched = new ArrayList<>();
-                    long fromMs = parseToEpoch(params.dateFrom, Long.MIN_VALUE);
-                    long toMs   = parseToEpoch(params.dateTo,   Long.MAX_VALUE);
-
-                    for (Map<String, Object> event : candidates) {
-                        long eventTime = effectiveTime(event);
-                        boolean inWindow = (params.dateFrom == null && params.dateTo == null)
-                            || (eventTime >= fromMs && eventTime <= toMs);
-                        if (inWindow) {
-                            matched.add(event);
                         }
                     }
 
@@ -331,6 +328,12 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
     // Private helpers
     // -----------------------------------------------------------------------
 
+    private static Set<String> intersect(Set<String> a, Set<String> b) {
+        Set<String> result = new HashSet<>(a);
+        result.retainAll(b);
+        return result;
+    }
+
     private QueryParams parseQueryParams(String json, String originalQuestion,
                                           String familyId, String timezone, String accountLabel) {
         try {
@@ -383,39 +386,11 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
         }
     }
 
-    private long effectiveTime(Map<String, Object> event) {
-        Long s = toLong(event.get("startTime"));
-        Long d = toLong(event.get("deadline"));
-        if (s != null) return s;
-        if (d != null) return d;
-        return Long.MAX_VALUE;
-    }
-
-    private Long toLong(Object val) {
-        if (val == null) return null;
-        if (val instanceof Long)    return (Long) val;
-        if (val instanceof Integer) return ((Integer) val).longValue();
-        if (val instanceof String) {
-            String s = (String) val;
-            try { return Long.parseLong(s); } catch (Exception ignored) {}
-            try { return Instant.parse(s).toEpochMilli(); } catch (Exception ignored) {}
-            try { return Instant.parse(s + "T00:00:00Z").toEpochMilli(); }
-            catch (Exception ignored) {}
-        }
-        return null;
-    }
-
     private boolean childNameMatches(Map<String, Object> event, String filter) {
         String lower = filter.toLowerCase();
         String childId   = str(event.get("childId"),   "").toLowerCase();
         String childName = str(event.get("childName"), "").toLowerCase();
         return childId.contains(lower) || childName.contains(lower);
-    }
-
-    private String str(Object val, String fallback) {
-        if (val == null) return fallback;
-        String s = val.toString().trim();
-        return s.isEmpty() ? fallback : s;
     }
 
     private String formatEventsForPrompt(List<Map<String, Object>> events,

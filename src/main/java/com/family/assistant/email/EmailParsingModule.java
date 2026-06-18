@@ -8,6 +8,11 @@ import com.rpl.rama.Depot;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -219,8 +224,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("eventType",      event.category);
                     eventRecord.put("title",          event.title);
                     eventRecord.put("description",    event.description);
-                    eventRecord.put("startTime",      event.startTime);
-                    eventRecord.put("deadline",       event.deadline);
+                    eventRecord.put("startTime",      parseIsoToEpoch(event.startTime));
+                    eventRecord.put("deadline",       parseIsoToEpoch(event.deadline));
                     eventRecord.put("receivedAt",     event.receivedAt);
                     eventRecord.put("senderEmail",    event.senderEmail);
                     eventRecord.put("senderName",     event.senderName);
@@ -259,6 +264,25 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         if (lower.contains("event") || lower.contains("field trip"))   return "SCHOOL_EVENT";
         if (lower.contains("task") || lower.contains("to-do"))         return "TASK";
         return "UNKNOWN";
+    }
+
+    private Long parseIsoToEpoch(String iso) {
+        if (iso == null || iso.isBlank() || "null".equalsIgnoreCase(iso)) return null;
+        try {
+            return Instant.parse(iso).toEpochMilli();
+        } catch (DateTimeParseException e1) {
+            try {
+                // ISO-8601 local datetime without zone — treat as UTC
+                return LocalDateTime.parse(iso).toInstant(ZoneOffset.UTC).toEpochMilli();
+            } catch (DateTimeParseException e2) {
+                try {
+                    // Date-only string like "2026-06-20"
+                    return LocalDate.parse(iso).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
+                } catch (DateTimeParseException e3) {
+                    return null;
+                }
+            }
+        }
     }
 
     private String extractTitle(String email) {

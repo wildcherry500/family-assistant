@@ -6,6 +6,8 @@ import com.rpl.agentorama.AgentTopology;
 import com.rpl.agentorama.store.PStateStore;
 import com.rpl.rama.Path;
 
+import static com.family.assistant.util.EventUtils.*;
+
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -46,22 +48,25 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
         public final long windowStartMs;
         public final long windowEndMs;
         public final String accountLabel; // null = no filter; non-null = return only events from this account
+        public final String timezone;     // e.g. "America/Los_Angeles"
 
         public DigestRequest(String familyId, long windowStartMs, long windowEndMs) {
-            this(familyId, windowStartMs, windowEndMs, null);
+            this(familyId, windowStartMs, windowEndMs, null, null);
         }
 
         public DigestRequest(String familyId, long windowStartMs, long windowEndMs, String accountLabel) {
+            this(familyId, windowStartMs, windowEndMs, accountLabel, null);
+        }
+
+        public DigestRequest(String familyId, long windowStartMs, long windowEndMs,
+                             String accountLabel, String timezone) {
             this.familyId       = familyId;
             this.windowStartMs  = windowStartMs;
             this.windowEndMs    = windowEndMs;
             this.accountLabel   = accountLabel;
+            this.timezone       = timezone != null ? timezone : "America/Los_Angeles";
         }
     }
-
-    private static final DateTimeFormatter DISPLAY_FMT =
-        DateTimeFormatter.ofPattern("EEE MMM d 'at' h:mm a")
-                         .withZone(ZoneId.of("America/Los_Angeles"));
 
     // -----------------------------------------------------------------------
     // defineAgents
@@ -79,37 +84,32 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
             .node("query-events", "build-summary",
                 (AgentNode agentNode, DigestRequest request) -> {
 
-                    PStateStore ps = agentNode.getMirrorStore(
+                    PStateStore psMain = agentNode.getMirrorStore(
                         "FamilySchemaModule", "$$family-data");
+                    PStateStore psDate = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$events-by-date");
 
-                    // Pull all events for this family
-                    // TODO: replace with a selective path query once we confirm
-                    //       sorted/filtered PState path syntax from RPL docs.
-                    //       For now we read all events and filter in memory.
-                    Map<String, Object> allEvents = (Map<String, Object>)
-                        ps.selectOne(Path.key(request.familyId).key("events"));
+                    // Use sorted date index for efficient range lookup
+                    @SuppressWarnings("unchecked")
+                    List<String> eventIds = (List<String>) (List<?>) psDate.select(
+                        Path.key(request.familyId)
+                            .sortedMapRange(request.windowStartMs, request.windowEndMs)
+                            .mapVals().all());
 
                     List<Map<String, Object>> windowEvents = new ArrayList<>();
-
-                    if (allEvents != null) {
-                        for (Map.Entry<String, Object> entry : allEvents.entrySet()) {
-                            Map<String, Object> event =
-                                (Map<String, Object>) entry.getValue();
-
-                            // Filter by time window using startTime or deadline
-                            Long startTime = toLong(event.get("startTime"));
-                            Long deadline  = toLong(event.get("deadline"));
-                            long relevant  = startTime != null ? startTime
-                                           : deadline  != null ? deadline
-                                           : Long.MAX_VALUE;
-
-                            if (relevant >= request.windowStartMs
-                                    && relevant <= request.windowEndMs) {
+                    if (eventIds != null) {
+                        for (String eventId : eventIds) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> event = (Map<String, Object>)
+                                psMain.selectOne(Path.key(request.familyId)
+                                                     .key("events").key(eventId));
+                            if (event != null) {
                                 windowEvents.add(event);
                             }
                         }
                     }
-                    // Apply accountLabel filter in memory after time-window selection
+
+                    // Apply accountLabel filter in memory
                     if (request.accountLabel != null) {
                         windowEvents.removeIf(ev ->
                             !request.accountLabel.equals(ev.get("accountLabel")));
@@ -122,23 +122,27 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                         return Long.compare(ta, tb);
                     });
 
-                    agentNode.emit("build-summary", request.familyId, windowEvents);
+                    agentNode.emit("build-summary", request.familyId, windowEvents, request.timezone);
                 })
 
             // ----------------------------------------------------------------
             // Node 2: build-summary
-            // Input:  String familyId, List<Map<String,Object>> events
+            // Input:  String familyId, List<Map<String,Object>> events, String timezone
             // Output: emits String digestText to finalize
             // ----------------------------------------------------------------
             .node("build-summary", "finalize",
                 (AgentNode agentNode, String familyId,
-                 List<Map<String, Object>> events) -> {
+                 List<Map<String, Object>> events, String timezone) -> {
 
                     if (events.isEmpty()) {
                         agentNode.emit("finalize",
                             "No upcoming events or deadlines in this window.");
                         return;
                     }
+
+                    DateTimeFormatter displayFmt = DateTimeFormatter
+                        .ofPattern("EEE MMM d 'at' h:mm a")
+                        .withZone(ZoneId.of(timezone));
 
                     StringBuilder sb = new StringBuilder();
                     sb.append("Family Digest — ")
@@ -159,12 +163,12 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
 
                         if (startTime != null) {
                             sb.append("  When: ")
-                              .append(DISPLAY_FMT.format(Instant.ofEpochMilli(startTime)))
+                              .append(displayFmt.format(Instant.ofEpochMilli(startTime)))
                               .append("\n");
                         }
                         if (deadline != null) {
                             sb.append("  Deadline: ")
-                              .append(DISPLAY_FMT.format(Instant.ofEpochMilli(deadline)))
+                              .append(displayFmt.format(Instant.ofEpochMilli(deadline)))
                               .append("\n");
                         }
 
@@ -192,36 +196,4 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                 });
     }
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
-
-    private Long toLong(Object val) {
-        if (val == null) return null;
-        if (val instanceof Long)    return (Long) val;
-        if (val instanceof Integer) return ((Integer) val).longValue();
-        if (val instanceof String s) {
-            try { return Long.parseLong(s); } catch (NumberFormatException ignored) {}
-            try {
-                // ISO-8601 local datetime (no zone) — treat as UTC
-                String normalized = s.length() == 19 ? s + "Z" : s;
-                return Instant.parse(normalized).toEpochMilli();
-            } catch (Exception ignored) {}
-        }
-        return null;
-    }
-
-    private long effectiveTime(Map<String, Object> event) {
-        Long s = toLong(event.get("startTime"));
-        Long d = toLong(event.get("deadline"));
-        if (s != null) return s;
-        if (d != null) return d;
-        return Long.MAX_VALUE;
-    }
-
-    private String str(Object val, String fallback) {
-        if (val == null) return fallback;
-        String s = val.toString().trim();
-        return s.isEmpty() ? fallback : s;
-    }
 }

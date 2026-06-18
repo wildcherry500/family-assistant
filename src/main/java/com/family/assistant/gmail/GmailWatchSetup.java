@@ -19,7 +19,7 @@ import java.util.logging.Logger;
  * programmatic renewal from a scheduler, or run main() manually.
  *
  * Prerequisites:
- *   - Pub/Sub topic exists: projects/family-assistant-dev-490204/topics/gmail-push-notifications
+ *   - Pub/Sub topic exists: projects/family-assistant-dev-490204/topics/gmail-notifications
  *   - The Gmail service account has Pub/Sub Publisher role on that topic
  *   - OAuth tokens already stored (run GmailOAuthSetup first)
  *
@@ -32,7 +32,7 @@ public class GmailWatchSetup {
     private static final Logger LOG = Logger.getLogger(GmailWatchSetup.class.getName());
 
     static final String TOPIC_NAME =
-        "projects/family-assistant-dev-490204/topics/gmail-push-notifications";
+        "projects/family-assistant-dev-490204/topics/gmail-notifications";
 
     /**
      * Renews the Gmail INBOX watch and returns the response.
