@@ -121,9 +121,17 @@ public class FamilyAssistantApp {
         System.out.println("[FamilyAssistantApp] AgentClient ready: gmail-ingestion-agent");
 
         // -----------------------------------------------------------------------
+        // Wire AgentClient for query-agent
+        // -----------------------------------------------------------------------
+        String queryModuleName = new QueryModule().getModuleName();
+        AgentManager queryAgentManager = AgentManager.create(cluster, queryModuleName);
+        AgentClient queryAgentClient = queryAgentManager.getAgentClient("query-agent");
+        System.out.println("[FamilyAssistantApp] AgentClient ready: query-agent");
+
+        // -----------------------------------------------------------------------
         // Start webhook receiver
         // -----------------------------------------------------------------------
-        WebhookReceiver receiver = new WebhookReceiver(gmailIngestionClient);
+        WebhookReceiver receiver = new WebhookReceiver(gmailIngestionClient, queryAgentClient);
         receiver.start(port);
 
         // -----------------------------------------------------------------------

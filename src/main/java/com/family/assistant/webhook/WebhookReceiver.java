@@ -1,12 +1,14 @@
 package com.family.assistant.webhook;
 
 import com.family.assistant.gmail.GmailIngestionModule;
+import com.family.assistant.query.QueryModule;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rpl.agentorama.AgentClient;
 import io.javalin.Javalin;
 
 import java.util.Base64;
+import java.util.Map;
 
 /**
  * WebhookReceiver
@@ -37,10 +39,12 @@ public class WebhookReceiver {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AgentClient gmailIngestionClient;
+    private final AgentClient queryAgentClient;
     private Javalin app;
 
-    public WebhookReceiver(AgentClient gmailIngestionClient) {
+    public WebhookReceiver(AgentClient gmailIngestionClient, AgentClient queryAgentClient) {
         this.gmailIngestionClient = gmailIngestionClient;
+        this.queryAgentClient = queryAgentClient;
     }
 
     // -----------------------------------------------------------------------
@@ -75,7 +79,31 @@ public class WebhookReceiver {
             });
         });
 
-        System.out.println("[WebhookReceiver] Listening on port " + port + " at POST /webhooks/gmail");
+        app.post("/query", ctx -> {
+            try {
+                JsonNode body = MAPPER.readTree(ctx.body());
+                String familyId = body.path("familyId").asText("keeling-family-001");
+                String question = body.path("question").asText("");
+                String timezone = body.path("requesterTimezone").asText("America/Los_Angeles");
+
+                if (question.isBlank()) {
+                    ctx.status(400);
+                    ctx.json(Map.of("error", "question is required"));
+                    return;
+                }
+
+                QueryModule.QueryRequest request =
+                    new QueryModule.QueryRequest(familyId, question, timezone);
+                String answer = (String) queryAgentClient.invoke(request);
+
+                ctx.json(Map.of("answer", answer));
+            } catch (Exception e) {
+                ctx.status(500);
+                ctx.json(Map.of("error", e.getMessage()));
+            }
+        });
+
+        System.out.println("[WebhookReceiver] Listening on port " + port + " at POST /webhooks/gmail, POST /query");
     }
 
     public void stop() {
