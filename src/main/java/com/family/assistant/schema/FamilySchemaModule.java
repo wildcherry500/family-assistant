@@ -22,6 +22,8 @@ import java.util.Map;
  *   $$events-by-category — familyId -> eventType  -> Set<eventId>
  *   $$events-by-account  — familyId -> accountLabel -> Set<eventId>
  *   $$events-by-date     — familyId -> epochMs (sorted) -> Set<eventId>
+ *   $$events-by-silo     — familyId -> silo (VAULT/OFFICE/STUDIO/UNKNOWN) -> Set<eventId>
+ *   $$events-by-intent   — familyId -> intent (ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN) -> Set<eventId>
  */
 public class FamilySchemaModule implements RamaModule, java.io.Serializable {
 
@@ -74,6 +76,18 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
+        // Inverted index: familyId -> silo -> Set<eventId>
+        stream.pstate("$$events-by-silo",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.setSchema(String.class))));
+
+        // Inverted index: familyId -> intent -> Set<eventId>
+        stream.pstate("$$events-by-intent",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.setSchema(String.class))));
+
         // Sorted date index: familyId -> epochMs -> Set<eventId>
         stream.pstate("$$events-by-date",
             PState.mapSchema(String.class,
@@ -104,6 +118,16 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .ifTrue(new Expr(FamilySchemaModule::isPresent, "*accountLabel"),
               Block.localTransform("$$events-by-account",
                   Path.key("*familyId").key("*accountLabel").nullToSet().voidSetElem().termVal("*eventId")))
+          // Extract silo and conditionally write silo index (UNKNOWN is a valid, present value and IS indexed)
+          .select("*record", Path.key("silo")).out("*silo")
+          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*silo"),
+              Block.localTransform("$$events-by-silo",
+                  Path.key("*familyId").key("*silo").nullToSet().voidSetElem().termVal("*eventId")))
+          // Extract intent and conditionally write intent index (UNKNOWN is a valid, present value and IS indexed)
+          .select("*record", Path.key("intent")).out("*intent")
+          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*intent"),
+              Block.localTransform("$$events-by-intent",
+                  Path.key("*familyId").key("*intent").nullToSet().voidSetElem().termVal("*eventId")))
           // Compute effective time (startTime ?? deadline) and write sorted date index
           .select("*record", Path.key("startTime")).out("*startTime")
           .select("*record", Path.key("deadline")).out("*deadline")

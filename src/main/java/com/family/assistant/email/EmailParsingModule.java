@@ -74,12 +74,15 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         public final String gmailMessageId; // Gmail message ID for traceability
         public final long   receivedAt;     // epoch millis when Gmail received the email
         public final String accountLabel;   // Gmail account that received this email, may be null
+        public final String silo;           // VAULT, OFFICE, STUDIO, or UNKNOWN
+        public final String intent;         // ACTION_REQUIRED, DECISION_NEEDED, FYI, SCHEDULING, or UNKNOWN
 
         public ParsedEvent(String category, String title, String description,
                            String startTime, String deadline,
                            String childId, String childName, String sourceEmail,
                            String senderEmail, String senderName, String emailSubject,
-                           String gmailMessageId, long receivedAt, String accountLabel) {
+                           String gmailMessageId, long receivedAt, String accountLabel,
+                           String silo, String intent) {
             this.category      = category;
             this.title         = title;
             this.description   = description;
@@ -94,6 +97,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
             this.gmailMessageId = gmailMessageId;
             this.receivedAt    = receivedAt;
             this.accountLabel  = accountLabel;
+            this.silo          = silo;
+            this.intent        = intent;
         }
     }
 
@@ -131,24 +136,69 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                 (AgentNode agentNode, GmailMessage message) -> {
 
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
-                    String prompt = "Classify this email into exactly one of these categories: "
-                        + "SCHOOL_EVENT, DEADLINE, PERMISSION_SLIP, TASK, UNKNOWN\n\n"
-                        + "Reply with only the category name, nothing else.\n\n" + message.body;
-                    String categoryStr = model.chat(prompt).trim().toUpperCase();
-                    if (!categoryStr.matches("SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN")) {
+                    String classifyPrompt = "Classify this email along three independent dimensions. "
+                        + "Reply with only valid JSON, no markdown fences:\n"
+                        + "{\"category\": \"SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN\", "
+                        + "\"silo\": \"VAULT|OFFICE|STUDIO|UNKNOWN\", "
+                        + "\"intent\": \"ACTION_REQUIRED|DECISION_NEEDED|FYI|SCHEDULING|UNKNOWN\"}\n\n"
+                        + "category: what the event IS.\n"
+                        + "silo: which life domain it belongs to — VAULT (personal/family: logistics, "
+                        + "medical, private financial, household), OFFICE (business: clients, operations, "
+                        + "strategy, business correspondence), STUDIO (creative/public: art, music, "
+                        + "content, cultural projects, public-facing work).\n"
+                        + "intent: what the email asks of you — ACTION_REQUIRED (must do something: "
+                        + "sign, pay, reply, attend), DECISION_NEEDED (must choose before anything can "
+                        + "proceed), FYI (awareness only, nothing required), SCHEDULING (primarily a "
+                        + "calendar/time-coordination matter).\n"
+                        + "Use UNKNOWN for any dimension you are not confident about — never guess.\n\n"
+                        + message.body;
+
+                    String classifyJson = model.chat(classifyPrompt).trim();
+
+                    String categoryStr = "UNKNOWN";
+                    String silo = "UNKNOWN";
+                    String intent = "UNKNOWN";
+                    try {
+                        String clean = classifyJson.replaceAll("```json", "").replaceAll("```", "").trim();
+                        com.fasterxml.jackson.databind.ObjectMapper mapper =
+                            new com.fasterxml.jackson.databind.ObjectMapper();
+                        Map<String, String> parsed = mapper.readValue(clean,
+                            new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {});
+
+                        String cat = parsed.get("category");
+                        if (cat != null && cat.toUpperCase()
+                                .matches("SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN")) {
+                            categoryStr = cat.toUpperCase();
+                        }
+                        String s = parsed.get("silo");
+                        if (s != null && s.toUpperCase().matches("VAULT|OFFICE|STUDIO|UNKNOWN")) {
+                            silo = s.toUpperCase();
+                        }
+                        String i = parsed.get("intent");
+                        if (i != null && i.toUpperCase()
+                                .matches("ACTION_REQUIRED|DECISION_NEEDED|FYI|SCHEDULING|UNKNOWN")) {
+                            intent = i.toUpperCase();
+                        }
+                    } catch (Exception e) {
+                        // keep UNKNOWN defaults for silo/intent — never guess;
+                        // category falls back to keyword classification below
+                    }
+
+                    if ("UNKNOWN".equals(categoryStr)) {
                         categoryStr = classifyByKeyword(message.body);
                     }
 
-                    agentNode.emit("extract-details", message, categoryStr);
+                    agentNode.emit("extract-details", message, categoryStr, silo, intent);
                 })
 
             // ----------------------------------------------------------------
             // Node 2: extract-details
-            // Input:  String rawEmail, String categoryStr
+            // Input:  String rawEmail, String categoryStr, String silo, String intent
             // Output: emits ParsedEvent to write-to-store
             // ----------------------------------------------------------------
             .node("extract-details", "write-to-store",
-                (AgentNode agentNode, GmailMessage message, String categoryStr) -> {
+                (AgentNode agentNode, GmailMessage message, String categoryStr,
+                 String silo, String intent) -> {
 
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
                     String today = java.time.LocalDate.now().toString();
@@ -191,7 +241,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                         null, childName, message.body,
                         message.senderEmail, message.senderName,
                         message.emailSubject, message.gmailMessageId,
-                        message.receivedAt, message.accountLabel
+                        message.receivedAt, message.accountLabel,
+                        silo, intent
                     );
 
                     agentNode.emit("write-to-store", event);
@@ -222,6 +273,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("sourceType",     "email");
                     eventRecord.put("accountLabel",   event.accountLabel);
                     eventRecord.put("eventType",      event.category);
+                    eventRecord.put("silo",           event.silo);
+                    eventRecord.put("intent",         event.intent);
                     eventRecord.put("title",          event.title);
                     eventRecord.put("description",    event.description);
                     eventRecord.put("startTime",      parseIsoToEpoch(event.startTime));

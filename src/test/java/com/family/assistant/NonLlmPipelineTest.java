@@ -350,7 +350,8 @@ public class NonLlmPipelineTest {
             "2026-03-20T08:30:00Z", "2026-03-18T00:00:00Z",
             "billy", "Billy", "raw email body",
             "teacher@school.edu", "Mr. Jacobs", "Zoo Field Trip",
-            "gmail-msg-123", System.currentTimeMillis(), "todd@gmail.com");
+            "gmail-msg-123", System.currentTimeMillis(), "todd@gmail.com",
+            "VAULT", "ACTION_REQUIRED");
 
         EmailParsingModule.ParsedEvent deserialized = roundTrip(original);
 
@@ -362,6 +363,8 @@ public class NonLlmPipelineTest {
         assertEquals(original.senderEmail, deserialized.senderEmail);
         assertEquals(original.gmailMessageId, deserialized.gmailMessageId);
         assertEquals(original.receivedAt, deserialized.receivedAt);
+        assertEquals(original.silo, deserialized.silo);
+        assertEquals(original.intent, deserialized.intent);
     }
 
     @Test
