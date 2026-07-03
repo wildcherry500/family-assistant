@@ -15,7 +15,8 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **78/78 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
+- **95/95 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
+- LLM-tagged suite (`QueryAgentTest`, `ZooEmailTest`) currently blocked — see "Known Issue" below
 
 ## GCP Project Situation (IMPORTANT)
 
@@ -65,6 +66,10 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | `$$events-by-category` | `familyId -> eventType` | `Set<eventId>` | Null/blank eventType not indexed |
 | `$$events-by-account` | `familyId -> accountLabel` | `Set<eventId>` | Null/blank accountLabel not indexed |
 | `$$events-by-date` | `familyId -> epochMs` (subindexed) | `Set<eventId>` | effectiveTime = startTime ?? deadline; null excluded |
+| `$$events-by-silo` | `familyId -> silo` | `Set<eventId>` | VAULT/OFFICE/STUDIO/UNKNOWN; UNKNOWN is indexed (correction-loop) |
+| `$$events-by-intent` | `familyId -> intent` | `Set<eventId>` | ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN; UNKNOWN is indexed |
+| `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
+| `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
 
 ### $$events-by-date — Rama 1.5.0 API notes (verified by testing)
 
@@ -107,19 +112,28 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (78 tests, all non-LLM)
+## Test Suite (95 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
 | `CohenFamilyDatasetTest` | 19 | Real 21-day dataset (13 email records), all indexes |
 | `IndexPStateTest` | 13 | Child/category index correctness |
+| `WeaknessLeverageMapTest` | 9 | `$$leverage-map`/`$$weakness-map` population, digest reordering, weakness annotation, graceful no-op |
 | `AccountLabelTest` | 8 | `$$events-by-account` index + DigestModule account filtering |
+| `SiloIntentIndexTest` | 8 | `$$events-by-silo`/`$$events-by-intent` population and isolation |
 | `QueryIndexTest` | 7 | `$$events-by-child` and `$$events-by-category` range assertions |
 | `DateIndexTest` | 6 | `$$events-by-date` range queries, effectiveTime logic |
 | `EmailIngestionTest` | 2 | Batch fan-out, blank/null filtering |
 | `FamilyAssistantTest` | 2 | Schema module + depot smoke test |
 | `GmailIngestionTest` | 1 | Live Gmail fetch (skips gracefully if no unread) |
+
+### LLM-tagged tests (`@Tag("llm")`, excluded by default — need `GEMINI_API_KEY`)
+
+| Test class | What it covers | Status |
+|---|---|---|
+| `QueryAgentTest` | Rubric-style `assertResponseContains` assertions on natural-language answers (zoo/field-trip fact, permission-slip date fact) | Assertions written and compile; blocked by ingestion bug, see Known Issue below |
+| `ZooEmailTest` | Prints Gemini's extraction + digest output for the real zoo email fixture | Same blocker |
 
 ### Test resources
 - `src/test/resources/cohen_family_test_dataset_complete.json` — Cohen family 21-day dataset (18 messages: Feb 10–Mar 2, 2026)
@@ -130,6 +144,26 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 - The "checkpoint at 10% context" instruction is **manual only** — no hook is configured
 - When user says "checkpoint": update this file, then `git add -A && git commit -m "checkpoint" && git push origin master`
 - No automated hook exists in `~/.claude/settings.json` or project `settings.local.json` for this
+
+## Known Issue (2026-07-03) — String vs GmailMessage ingestion mismatch
+
+`EmailIngestionModule`'s `ingest` node (`EmailIngestionModule.java:68`) takes
+`List<GmailMessage>`, but the module's own javadoc (lines 17, 22) still describes
+`List<String>` raw emails, and two LLM-tagged tests — `QueryAgentTest.setup()` (line 58)
+and `ZooEmailTest.testZooEmailExtraction` (lines 112-114) — still call
+`ingestionAgent.invoke(new ArrayList<>(List.of(rawEmailString)))`, i.e. pass a
+`List<String>`. Both fail identically in `@BeforeAll`/test body with
+`ClassCastException: String cannot be cast to GmailMessage`. Confirmed pre-existing, not
+caused by this session's Task 1/Task 2 changes (neither test's ingestion call site nor
+`EmailIngestionModule` were touched by that work). Likely cause: the `ingest` node's
+parameter type was migrated to `GmailMessage` as part of the Gmail-native ingestion path
+(`GmailIngestionModule`, Pub/Sub work above) without updating the two direct-String test
+call sites or the stale javadoc.
+
+**Decision:** fix scoped to test call sites — adapt `QueryAgentTest`/`ZooEmailTest` (and
+any other `List<String>` callers found) to construct `GmailMessage` objects via a shared
+test helper. `EmailIngestionModule`'s signature is production and does not change;
+production wins, tests adapt.
 
 ## Next Task
 

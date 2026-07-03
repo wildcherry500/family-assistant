@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -38,6 +39,56 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
     @Override
     public String getModuleName() {
         return "DigestModule";
+    }
+
+    // -----------------------------------------------------------------------
+    // Weakness-map / leverage-map matching
+    //
+    // Both maps hold entries shaped { "silo"->String|null, "intent"->String|null, ... }.
+    // A null/absent silo or intent on an entry is a wildcard for that dimension.
+    // -----------------------------------------------------------------------
+
+    private static boolean matchesDimension(Object entryVal, Object eventVal) {
+        return entryVal == null || entryVal.equals(eventVal);
+    }
+
+    private static boolean entryMatches(Map<String, Object> entry, Map<String, Object> event) {
+        return matchesDimension(entry.get("silo"), event.get("silo"))
+            && matchesDimension(entry.get("intent"), event.get("intent"));
+    }
+
+    /** Highest weight among leverage entries matching this event, or 0 if none match. */
+    private static long leverageScore(Map<String, Object> event, Map<String, Object> leverageEntries) {
+        long score = 0;
+        if (leverageEntries != null) {
+            for (Object v : leverageEntries.values()) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> entry = (Map<String, Object>) v;
+                if (entryMatches(entry, event)) {
+                    long weight = toLong(entry.get("weight")) != null ? toLong(entry.get("weight")) : 0;
+                    if (weight > score) score = weight;
+                }
+            }
+        }
+        return score;
+    }
+
+    /** Combined [tag] note text for every weakness entry matching this event, or null if none match. */
+    private static String weaknessNote(Map<String, Object> event, Map<String, Object> weaknessEntries) {
+        if (weaknessEntries == null) return null;
+        StringBuilder sb = new StringBuilder();
+        for (Object v : weaknessEntries.values()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> entry = (Map<String, Object>) v;
+            if (entryMatches(entry, event)) {
+                String tag  = str(entry.get("tag"), "FLAGGED");
+                String note = str(entry.get("note"), "");
+                if (sb.length() > 0) sb.append("; ");
+                sb.append("[").append(tag).append("]");
+                if (!note.isEmpty()) sb.append(" ").append(note);
+            }
+        }
+        return sb.length() > 0 ? sb.toString() : null;
     }
 
     // -----------------------------------------------------------------------
@@ -88,6 +139,10 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                         "FamilySchemaModule", "$$family-data");
                     PStateStore psDate = agentNode.getMirrorStore(
                         "FamilySchemaModule", "$$events-by-date");
+                    PStateStore psLeverage = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$leverage-map");
+                    PStateStore psWeakness = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$weakness-map");
 
                     // Use sorted date index for efficient range lookup
                     @SuppressWarnings("unchecked")
@@ -104,7 +159,7 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                                 psMain.selectOne(Path.key(request.familyId)
                                                      .key("events").key(eventId));
                             if (event != null) {
-                                windowEvents.add(event);
+                                windowEvents.add(new HashMap<>(event));
                             }
                         }
                     }
@@ -115,11 +170,29 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
                             !request.accountLabel.equals(ev.get("accountLabel")));
                     }
 
-                    // Sort by soonest first
+                    // weakness-map / leverage-map are per-family config; both are optional
+                    // (empty or missing for a family is a graceful no-op, not a failure).
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> leverageEntries = (Map<String, Object>)
+                        psLeverage.selectOne(Path.key(request.familyId));
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> weaknessEntries = (Map<String, Object>)
+                        psWeakness.selectOne(Path.key(request.familyId));
+
+                    for (Map<String, Object> event : windowEvents) {
+                        String note = weaknessNote(event, weaknessEntries);
+                        if (note != null) {
+                            event.put("_weaknessNote", note);
+                        }
+                    }
+
+                    // Sort by leverage score first (leverage matches float to the top),
+                    // soonest-first as the tiebreak among equal (including zero/no-match) scores.
                     windowEvents.sort((a, b) -> {
-                        long ta = effectiveTime(a);
-                        long tb = effectiveTime(b);
-                        return Long.compare(ta, tb);
+                        long scoreA = leverageScore(a, leverageEntries);
+                        long scoreB = leverageScore(b, leverageEntries);
+                        if (scoreA != scoreB) return Long.compare(scoreB, scoreA);
+                        return Long.compare(effectiveTime(a), effectiveTime(b));
                     });
 
                     agentNode.emit("build-summary", request.familyId, windowEvents, request.timezone);
@@ -174,6 +247,12 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
 
                         sb.append("  Status: ").append(status).append("\n");
                         sb.append("  Assigned: ").append(assignedTo).append("\n");
+
+                        String weaknessNote = str(event.get("_weaknessNote"), "");
+                        if (!weaknessNote.isEmpty()) {
+                            sb.append("  Note: ").append(weaknessNote).append("\n");
+                        }
+
                         sb.append("\n");
                     }
 

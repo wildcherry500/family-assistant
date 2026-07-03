@@ -91,14 +91,16 @@ public class QueryAgentTest {
     @Tag("llm")
     @Order(2)
     void testWhenIsNextPermissionSlipDue() throws Exception {
-        ask("When is the next permission slip due?");
+        String answer = ask("When is the next permission slip due?");
+        assertResponseContains(answer, "March 16", "3/16", "16th");
     }
 
     @Test
     @Tag("llm")
     @Order(3)
     void testWhatIsHappeningOnMarch20() throws Exception {
-        ask("What is happening on March 20th?");
+        String answer = ask("What is happening on March 20th?");
+        assertResponseContains(answer, "zoo", "Woodland Park", "field trip");
     }
 
     @Test
@@ -112,7 +114,7 @@ public class QueryAgentTest {
     // Helper
     // -----------------------------------------------------------------------
 
-    private void ask(String question) {
+    private String ask(String question) {
         QueryModule.QueryRequest request =
             new QueryModule.QueryRequest(FAMILY_ID, question, TIMEZONE);
 
@@ -123,5 +125,28 @@ public class QueryAgentTest {
 
         assertNotNull(answer, "Answer should not be null");
         assertFalse(answer.isBlank(), "Answer should not be blank");
+        return answer;
+    }
+
+    /**
+     * Case-insensitive substring assertion: passes if the answer contains at
+     * least ONE of the given substrings. Use this to assert phrasing variants
+     * of a SINGLE expected fact (e.g. "zoo", "Woodland Park", "field trip" all
+     * refer to the same event) — the LLM's exact wording isn't predictable, so
+     * asserting any one variant is present is enough to confirm the fact
+     * landed. To assert multiple DISTINCT facts, call this multiple times
+     * (once per fact), not once with a mixed bag of unrelated substrings —
+     * a single call always uses OR semantics, never AND.
+     */
+    private void assertResponseContains(String answer, String... expectedSubstrings) {
+        assertNotNull(answer, "Answer should not be null");
+        String lower = answer.toLowerCase();
+        for (String expected : expectedSubstrings) {
+            if (lower.contains(expected.toLowerCase())) {
+                return;
+            }
+        }
+        fail("Expected answer to contain one of " + java.util.Arrays.toString(expectedSubstrings)
+            + " but got: " + answer);
     }
 }

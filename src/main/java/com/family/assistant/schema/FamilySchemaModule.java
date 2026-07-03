@@ -24,12 +24,28 @@ import java.util.Map;
  *   $$events-by-date     — familyId -> epochMs (sorted) -> Set<eventId>
  *   $$events-by-silo     — familyId -> silo (VAULT/OFFICE/STUDIO/UNKNOWN) -> Set<eventId>
  *   $$events-by-intent   — familyId -> intent (ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN) -> Set<eventId>
+ *   $$leverage-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "weight"->Long }
+ *   $$weakness-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "tag"->String, "note"->String }
+ *
+ * Config records (weakness-map / leverage-map):
+ *   *weakness-leverage-config depot carries records shaped
+ *   { "familyId"->String, "mapType"->"LEVERAGE"|"WEAKNESS", "entryId"->String, "entry"->Map }.
+ *   silo/intent on an entry are wildcards when null/absent — DigestModule treats a
+ *   missing dimension as "matches any value" for that dimension.
  */
 public class FamilySchemaModule implements RamaModule, java.io.Serializable {
 
     /** Returns true when a String is non-null and non-blank. */
     private static boolean isPresent(String s) {
         return s != null && !s.isBlank();
+    }
+
+    private static boolean isLeverageMapType(String mapType) {
+        return "LEVERAGE".equals(mapType);
+    }
+
+    private static boolean isWeaknessMapType(String mapType) {
+        return "WEAKNESS".equals(mapType);
     }
 
     /** Returns startTime if set, deadline if set, or null if neither is present. */
@@ -49,8 +65,10 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
     @Override
     public void define(Setup setup, Topologies topologies) {
         setup.declareDepot("*family-events", Depot.hashBy("familyId"));
+        setup.declareDepot("*weakness-leverage-config", Depot.hashBy("familyId"));
 
         var stream = topologies.stream("family-events-stream");
+        var configStream = topologies.stream("weakness-leverage-config-stream");
 
         // Primary store
         stream.pstate("$$family-data",
@@ -95,6 +113,18 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                     PState.setSchema(String.class)
                 ).subindexed()));
 
+        // Config: familyId -> entryId -> leverage entry (silo/intent -> weight)
+        configStream.pstate("$$leverage-map",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class, Object.class))));
+
+        // Config: familyId -> entryId -> weakness entry (silo/intent -> tag/note)
+        configStream.pstate("$$weakness-map",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class, Object.class))));
+
         stream.source("*family-events").out("*record")
           .select("*record", Path.key("familyId")).out("*familyId")
           .select("*record", Path.key("id")).out("*eventId")
@@ -136,5 +166,18 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
               Block.localTransform("$$events-by-date",
                   Path.key("*familyId", "*epochMs")
                       .nullToSet().voidSetElem().termVal("*eventId")));
+
+        configStream.source("*weakness-leverage-config").out("*configRecord")
+          .select("*configRecord", Path.key("familyId")).out("*familyId")
+          .select("*configRecord", Path.key("entryId")).out("*entryId")
+          .select("*configRecord", Path.key("entry")).out("*entry")
+          .select("*configRecord", Path.key("mapType")).out("*mapType")
+          .hashPartition("*familyId")
+          .ifTrue(new Expr(FamilySchemaModule::isLeverageMapType, "*mapType"),
+              Block.localTransform("$$leverage-map",
+                  Path.key("*familyId").key("*entryId").termVal("*entry")))
+          .ifTrue(new Expr(FamilySchemaModule::isWeaknessMapType, "*mapType"),
+              Block.localTransform("$$weakness-map",
+                  Path.key("*familyId").key("*entryId").termVal("*entry")));
     }
 }
