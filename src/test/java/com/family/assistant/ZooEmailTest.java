@@ -111,7 +111,8 @@ public class ZooEmailTest {
         // Ingest the zoo email
         EmailIngestionModule.IngestionResult result =
             (EmailIngestionModule.IngestionResult)
-                ingestionAgent.invoke(new ArrayList<>(List.of(ZOO_EMAIL)));
+                ingestionAgent.invoke(new ArrayList<>(
+                    List.of(GmailMessageTestFixtures.fromRawBody(ZOO_EMAIL))));
 
         System.out.println("\n=== INGESTION RESULT ===");
         System.out.println(result);

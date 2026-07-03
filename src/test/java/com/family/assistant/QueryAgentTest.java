@@ -55,7 +55,8 @@ public class QueryAgentTest {
 
         EmailIngestionModule.IngestionResult result =
             (EmailIngestionModule.IngestionResult)
-                ingestionAgent.invoke(new ArrayList<>(List.of(ZooEmailTest.ZOO_EMAIL)));
+                ingestionAgent.invoke(new ArrayList<>(
+                    List.of(GmailMessageTestFixtures.fromRawBody(ZooEmailTest.ZOO_EMAIL))));
 
         assumeTrue(result.failed == 0,
             "Skipping — email ingestion failed (Gemini rate limit or quota exhausted)");

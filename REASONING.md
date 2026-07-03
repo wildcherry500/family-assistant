@@ -425,3 +425,91 @@ never reached. Reporting the actual answers from a real Gemini run, per the acce
 gate, is blocked on this pre-existing bug being fixed first, which needs your direction:
 fix `EmailIngestionModule`/the two tests now (separate small task), or treat "compiles
 clean, non-LLM suite green" as sufficient for today's gate and defer the LLM run.
+
+## Checkpoint — CLAUDE_HANDOFF.md updated, committed, pushed
+
+User chose to checkpoint before the mismatch fix. Updated `CLAUDE_HANDOFF.md`: test count
+78→95, added the four new PStates to the schema table, added `SiloIntentIndexTest` and
+`WeaknessLeverageMapTest` rows plus an LLM-tagged-tests table, and a new "Known Issue"
+section documenting the String/GmailMessage mismatch and the scoped-fix decision (test
+call sites adapt, `EmailIngestionModule`'s signature is production and doesn't change).
+Committed (`7f30920`) and pushed to `origin/master`.
+
+## Mismatch fix — scoped to test call sites, per user decision
+
+Grepped every `ingestionAgent.invoke(...)` call site in `src/test`. Found exactly two
+broken ones — `ZooEmailTest.java:114` and `QueryAgentTest.java:58` — both passing
+`List<String>`. `EmailIngestionTest.java` was already correct (constructs `GmailMessage`
+directly per-test since it needs varied field values for its blank/null-filtering
+assertions); its pattern is what I copied for the shared helper rather than inventing a
+new one.
+
+Added `GmailMessageTestFixtures.fromRawBody(String)` (new file,
+`src/test/java/com/family/assistant/`) — wraps a raw email body string in a
+`GmailMessage` with `gmailMessageId=null` (falls back to a random UUID per
+`EmailParsingModule.java:261-262`, confirmed by reading that code, not guessed) and
+`emailSubject=null` (so title extraction falls back to `EmailParsingModule`'s body-based
+`extractTitle()`, preserving the exact behavior these two fixtures had before
+`GmailMessage` existed — I did not want the fix to silently change what gets extracted
+from the fixture). `senderEmail="test@example.com"` since neither test reads it. Updated
+both call sites to `GmailMessageTestFixtures.fromRawBody(ZOO_EMAIL)`.
+
+`mvn -o test-compile`: clean. `mvn -o test` (non-LLM, `llm` excluded): still **95/95
+green**, `BUILD SUCCESS` — this fix touched only `@Tag("llm")` test files plus one new
+test-only helper class, nothing in the non-LLM path.
+
+## Running the LLM suite — the mismatch is fixed, but it surfaced two more pre-existing bugs
+
+`mvn -o test -Dtest=ZooEmailTest,QueryAgentTest -Dexcluded.groups=` with a real
+`GEMINI_API_KEY`: **the `ClassCastException` from `EmailIngestionModule` is gone** —
+ingestion now succeeds (`IngestionResult{parsed=1, skipped=0, failed=0}`), confirming the
+scoped fix worked exactly as intended. But two more issues surfaced, both pre-existing and
+both outside anything this session (or the mismatch fix) touched:
+
+**1. `QueryAgentTest` — all 4 questions return "no events matching."** The event itself
+extracted correctly and is genuinely in `$$family-data`
+(`familyId=keeling-family-001`, `eventType=SCHOOL_EVENT`, `silo=VAULT`,
+`intent=ACTION_REQUIRED`, `title="3rd Grade Zoo Trip"`, real `startTime`/`deadline` epoch
+values — confirmed by reading `ZooEmailTest.testZooEmailExtraction`'s printed output,
+which passed). The query agent still can't find it. I read (not modified)
+`QueryModule.java`'s `interpret-query`/`fetch-data` nodes to understand why, without
+fixing anything, since `QueryModule` filter wiring was explicitly out of scope from the
+very first task description this session ("OUT OF SCOPE this session: ... QueryModule
+filter wiring"). Two plausible root causes, both structural, neither guessed at random:
+(a) the `ZOO_EMAIL` fixture never actually mentions a child named "Billy" — it's a
+generic class-wide letter, no student named — so `testWhatDoesBillyNeedForFieldTrip` and
+`testDoINeedToPickUpBilly` failing to find a "Billy"-matching event may be *correct*
+behavior on a mismatched fixture, not a bug; (b) the whole email collapses into **one**
+event with `eventType=SCHOOL_EVENT`, but `QueryModule`'s LLM query-parser can independently
+choose `categoryFilter=PERMISSION_SLIP` for the permission-slip question — since
+`$$events-by-category`'s `PERMISSION_SLIP` bucket is empty (the event is indexed only
+under `SCHOOL_EVENT`), that filter alone yields zero candidates even though a relevant
+event exists. This is a real single-event-multiple-topics classification tension in the
+schema, not something I'm fixing today — flagging it precisely so it isn't rediscovered
+as a mystery next time `QueryModule` work is in scope.
+
+**2. `ZooEmailTest.testDigestAfterZooEmail` — `ClassCastException: Long cannot be cast to
+String`.** Its own diagnostic code at `ZooEmailTest.java:172` does
+`String startTime = (String) ev.get("startTime");`, but the schema stores `startTime` as
+`Long` (confirmed in `CLAUDE_HANDOFF.md`'s Event record fields table and in the actual
+extraction printout from test 1). This crashes before the test ever reaches
+`digestAgent.invoke(...)` or its assertions — it's a stale assumption in the test's own
+print-debugging code, not anything related to the `GmailMessage` fix (I only touched line
+114 in this file). Not fixed — outside the scope of "fix the mismatch."
+
+**Actual answers from the real Gemini run** (verbatim, per the acceptance gate):
+- "What does Billy need for the field trip?" → "I didn't find any events matching your
+  question for Billy."
+- "When is the next permission slip due?" → "I didn't find any events matching your
+  question." — assertion failed (expected one of ["March 16", "3/16", "16th"]).
+- "What is happening on March 20th?" → "I didn't find any events matching your
+  question." — assertion failed (expected one of ["zoo", "Woodland Park", "field
+  trip"]).
+- "Do I need to pick up Billy from school?" → "I didn't find any events matching your
+  question for Billy."
+
+The rubric assertions did exactly the job they were built for: the old not-blank checks
+would have passed on all four of these "no events matching" answers silently. The new
+assertions correctly caught that the agent isn't actually answering the questions,
+surfacing a real `QueryModule` bug that was invisible before. Stopping here per
+instructions — no further commit without go-ahead.
