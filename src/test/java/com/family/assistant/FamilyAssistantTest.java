@@ -83,7 +83,7 @@ public class FamilyAssistantTest {
                 "Our class will visit the Science Center on March 20th.\n" +
                 "Students must bring a bag lunch.";
 
-            Object result = emailAgent.invoke(rawEmail);
+            Object result = emailAgent.invoke(GmailMessageTestFixtures.fromRawBody(rawEmail));
 
             // Result should be a non-null eventId string
             assertNotNull(result, "Agent should return an eventId");
@@ -168,7 +168,7 @@ public class FamilyAssistantTest {
                 "The annual science fair will be held March 25th at 6pm.\n" +
                 "Projects are due March 22nd.";
 
-            String eventId = (String) emailAgent.invoke(rawEmail);
+            String eventId = (String) emailAgent.invoke(GmailMessageTestFixtures.fromRawBody(rawEmail));
             assertNotNull(eventId, "Should get an eventId back");
 
             // Now request a digest covering that window

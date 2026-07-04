@@ -1041,3 +1041,364 @@ session (explicitly out of scope), but noting it precisely since it's now demons
 not hypothetical.
 
 Nothing committed or pushed — stopping here per instructions.
+
+## New session — multi-event extraction, deterministic dates, sane times
+
+Read `CLAUDE_HANDOFF.md`, `RAMA_VERIFIED_LEARNINGS.md`, this file (including the
+non-determinism flag above), `EmailParsingModule.java`, `EmailIngestionModule.java`,
+`FamilySchemaModule.java`, `ZooEmailTest.java`, `QueryAgentTest.java`,
+`NonLlmPipelineTest.java`, plus `EmailIngestionTest.java`, `FamilyAssistantTest.java`,
+`GmailMessage.java`, `DigestModule.java`, and `QueryModule.java`'s date-parsing helpers
+for ripple/pattern evidence. Also verified, against actual jars on this machine, two
+things the task asked me not to guess:
+
+- `dev.langchain4j.model.googleai.BaseGeminiChatModel$GoogleAiGeminiChatModelBaseBuilder`
+  (decompiled from `langchain4j-google-ai-gemini-1.8.0.jar`, the version pinned in
+  `pom.xml`) DOES expose `.temperature(Double)` and `.seed(Integer)` — confirmed by
+  `javap`, not assumed from langchain4j's general docs.
+- The same builder does NOT have a `GoogleAiGeminiChatModelBuilder`-level
+  `responseFormat` override visible on the subclass, but the shared base builder does:
+  `.responseFormat(ResponseFormat)`. This means structured/JSON-schema output is
+  available in our pinned dependency if wanted — noted as an option below, not adopted,
+  since it would be a new pattern in this codebase (current code always does
+  prompt-only JSON + manual parsing) and nothing in the task asked for it.
+
+### Phase A1 — baseline
+
+`mvn -o test` (non-LLM, default exclusion): **111/111, BUILD SUCCESS.** Matches
+`CLAUDE_HANDOFF.md`'s claim exactly.
+
+### Phase A2 — LLM suite, three consecutive runs (`mvn -o test -Dexcluded.groups=`)
+
+*(Tooling note: my first attempt at run 2 silently executed against
+`/Volumes/CORSAIR/family-assistant` — the stray non-git scratch folder — because a prior
+`cd` into a scratchpad directory during jar inspection caused the shell's cwd to reset to
+this session's configured "primary working directory" rather than persisting my last
+real `cd`. It failed fast with "no POM in this directory," was obviously wrong, and I
+redid it with an explicit `cd /Users/toddkeelingfolder/CORSAIR/family_assistant &&`
+prefix. Flagging so I don't repeat it — every `mvn` call this session must carry that
+explicit prefix.)*
+
+| Run | `QueryAgentTest` | Field-trip time extracted | Permission-slip test | March-20 test |
+|---|---|---|---|---|
+| 1 | 3/4 (`Tests run: 4, Failures: 1`) | "Friday, March 20th at **1:00 AM PDT**" | **FAIL** — "I didn't find any events matching your question." | PASS |
+| 2 | 2/4 (`Tests run: 4, Failures: 2`) | "Thursday, **March 19** at 5:00 PM PDT" — wrong calendar day | **FAIL** | **FAIL** — "I didn't find any events matching your question." |
+| 3 | 3/4 (`Tests run: 4, Failures: 1`) | "Friday, March 20" / elsewhere in the same run's answer: "**1:00 AM PDT**" | **FAIL** | PASS |
+
+**QueryAgentTest went 4/4 in zero of three runs.** The permission-slip question failed
+in all three — not a rare flake, a near-constant failure, worse than
+`CLAUDE_HANDOFF.md`'s "all 4 green as of 2026-07-03" claim (that claim was true on
+whatever single run produced it, but isn't the steady-state behavior). The March-20
+question failed once (run 2), when the extracted day itself landed on March 19 instead
+of March 20 — direct, reproduced confirmation of the exact non-determinism this file
+already flagged last session, now with a third example: two runs produced "1:00 AM PDT"
+(same implausible value both times), one run produced "5:00 PM PDT" on the wrong day
+entirely. Three runs, three different observed `startTime` outcomes for the identical
+input email — this is exactly what R1/R2/R3 are meant to fix, confirmed empirically
+before touching anything.
+
+**A precise, new piece of evidence on *why* the permission-slip question specifically
+fails so consistently**: in run 3, the March-20 answer correctly surfaces both the trip
+*and* the permission-slip deadline ("...with a deadline of Monday, March 16th, at 4:59 PM
+PDT") from the one collapsed record — proving the deadline data is present and correct in
+storage — yet the dedicated permission-slip question still fails. This is consistent with
+`QueryModule`'s two-tier hard/soft filter design (documented earlier in this file): the
+permission-slip question likely resolves to a SOFT `categoryFilter=PERMISSION_SLIP` with
+no HARD dimension (no keywords, no date range) — and since the stored record's real
+`eventType` is `SCHOOL_EVENT` (the classify step only ever assigns one category per
+email), the SOFT filter alone finds nothing, and per the two-tier design's own stated
+rule ("if no HARD dimension was present at all, an empty intersection stays empty"),
+there's no fallback to rescue it. This isn't a search-agent bug — the search-agent is
+behaving exactly as documented — it's a direct, mechanical consequence of one email
+collapsing two distinct real-world items into one `eventType`. Strong, specific
+confirmation that R1 is the actual fix for this failure mode, not a coincidental
+correlation.
+
+### Phase A2 (bonus, unplanned) — two pre-existing bugs surfaced, unrelated to R1/R2/R3
+
+All three runs also showed identical (non-flaky, 100%-reproducible) failures I did not
+expect and are NOT part of the classify/extract path:
+
+1. **`GmailMessage`/`String` cast mismatch, still present at 5 call sites.**
+   `CLAUDE_HANDOFF.md`'s "RESOLVED (2026-07-03) — String vs GmailMessage ingestion
+   mismatch" note says this was fixed by switching `QueryAgentTest`/`ZooEmailTest` to
+   `GmailMessageTestFixtures.fromRawBody(...)`. It was — but three other call sites still
+   pass a raw `String`/`List<String>` directly into agents that require
+   `GmailMessage`/`List<GmailMessage>`, and every one of them throws the identical
+   `ClassCastException: class java.lang.String cannot be cast to class
+   com.family.assistant.gmail.GmailMessage` in all three runs:
+   - `FamilyAssistantTest.java:86` (`testEmailParsingWritesEventToStore`, `@Tag("llm")`)
+   - `FamilyAssistantTest.java:171` (`testEndToEnd_EmailThenDigest`, `@Tag("llm")`)
+   - `EmailIngestionTest.java:117,141,169` (`testMixedBatchSkipsBlanksAndParsesValid`,
+     `testDuplicateEmailsProduceSeparateEvents`, `testMalformedEmailsDoNotCrashBatch`, all
+     `@Tag("llm")`) — these pass `List<String>` where `EmailIngestionModule`'s `ingest`
+     node requires `List<GmailMessage>`.
+   This means 5 of the repo's `@Tag("llm")` tests currently **always** fail, deterministically,
+   regardless of anything this session touches — `CLAUDE_HANDOFF.md`'s "RESOLVED" note is
+   accurate for the two sites it names but incomplete as a statement about the whole
+   suite's health.
+2. **`ZooEmailTest.testZooEmailExtraction` — "Executor pool is shut down."** Reproduced
+   identically in all three runs, always the same Clojure-level error inside
+   `getMirrorAgentClient`/query-invoke internals, not inside app code I can point to a
+   line number for. Looks like JVM-wide test-ordering interaction (Surefire runs all
+   classes in one JVM by default; something torn down by an earlier test class's
+   `ipc.close()` isn't recreated for a later class's fresh `InProcessCluster`) rather than
+   anything in `EmailParsingModule`'s classify/extract path.
+
+**Neither of these is caused by, or fixable within, this session's mandate** (classify/
+extract-details path only). But they directly collide with the acceptance gate as
+written: *"run the full LLM suite FIVE consecutive times... 5/5 green"* — as things stand,
+the full `@Tag("llm")` suite cannot reach 5/5 green no matter what I do to
+`EmailParsingModule`, because 5 tests in two other classes fail for reasons outside this
+session's scope. **Flagging this as a plan-divergence point, not deciding it myself**: I
+need to know whether "the full LLM suite" in the acceptance gate means literally every
+`@Tag("llm")` test in the repo (in which case these two pre-existing bugs need fixing
+too, even though they're outside the classify/extract path), or specifically
+`QueryAgentTest` (the 4 rubric tests) plus `ZooEmailTest` (the two tests this session's
+CONTEXT section is actually about) — in which case I'd propose running those specific
+classes for the acceptance gate and reporting the other two pre-existing bugs as a
+separate, optional fix to take or leave.
+
+### Phase A3 — full ripple inventory: every place assuming ONE event per email
+
+**Production code (must change for R1):**
+- `EmailParsingModule.java:238-246` — `extract-details` node builds exactly one
+  `ParsedEvent` per email.
+- `EmailParsingModule.java:256-295` (`write-to-store`) — builds exactly one
+  `eventRecord`, calls `depot.append()` once.
+- `EmailParsingModule.java:261-263` — **idempotency scheme breaks under multi-event**:
+  `eventId = gmailMessageId` directly. If N>1 events share one `gmailMessageId`, giving
+  them the same ID means they'd overwrite each other in `$$family-data` (last-write-wins
+  on an identical key) — this is a real bug R1 must solve, not just a type change. My
+  plan proposes a composite key (below).
+- `EmailParsingModule.java:302-306` (`finalize`) — takes a single `String eventId`,
+  calls `agentNode.result(eventId)`. Must become a list.
+- `EmailIngestionModule.java:34` — `IngestionResult.eventIds` comment says "one per
+  successfully parsed email"; the field itself (`List<String>`, flat) needs no type
+  change, only its accumulation logic does.
+- `EmailIngestionModule.java:76,86,89,93` — `futures` is
+  `List<CompletableFuture<String>>`; `parsingClient.invoke(m)` returns one ID; accumulation
+  is `eventIds.add(f.get())`. All four must change to accumulate a *list of lists*
+  (`eventIds.addAll(f.get())`) once the per-email agent returns `List<String>`.
+- `GmailIngestionModule.java:279-294` — **checked, no change needed.** Only reads
+  `result.eventIds.size()` for a summary count; doesn't assume 1:1 with email count.
+
+**Test code (ripple, needs updating — each will get a one-line justification when I
+actually make the edit, per the acceptance gate):**
+- `ZooEmailTest.java:120` — `assertEquals(1, result.eventIds.size(), "Should parse 1
+  email")`. Direct contradiction of R1's explicit requirement. Must become `assertTrue(...
+  >= 2)`.
+- `FamilyAssistantTest.java:89-91` (`testEmailParsingWritesEventToStore`) —
+  `assertInstanceOf(String.class, result, ...)` on the direct agent invoke result. Must
+  change to expect a `List`. (Also currently broken by the pre-existing `GmailMessage`
+  cast bug above — flagged separately.)
+- `FamilyAssistantTest.java:171-172` (`testEndToEnd_EmailThenDigest`) — `String eventId =
+  (String) emailAgent.invoke(rawEmail);`. Same change needed. (Same pre-existing bug
+  applies.)
+- `EmailIngestionTest.java:121` — `assertEquals(2, result.eventIds.size(), "Two valid
+  emails should produce event IDs")`. The two emails are `"Field Trip to the Zoo\nPlease
+  return permission slip by Friday.\nBring $5."` and `"Reminder: Science project due
+  Monday."` — the first one bundles a field trip AND a permission-slip deadline,
+  structurally identical to the zoo fixture. A correctly-working multi-event extractor
+  could reasonably split it into 2, making the true total 3, not 2. This assertion needs
+  to become tolerant (`>= 2`), not just retyped — a hardcoded exact total isn't
+  something to encode when the actual count depends on LLM judgment about what's
+  "distinct."
+- `EmailIngestionTest.java:143-145` (`testDuplicateEmailsProduceSeparateEvents`) — email
+  is `"Book Fair next Thursday in the school gym."` (single clear item, unlikely to
+  split) sent twice; asserts exactly 2 distinct IDs total. Should still hold under R1
+  (each copy → 1 event, distinct IDs from my proposed composite key scheme), but flagging
+  since it's the one assertion most directly testing the idempotency/uniqueness property
+  R1's ID scheme has to preserve.
+- `EmailIngestionTest.java:173` (`testMalformedEmailsDoNotCrashBatch`) — `assertEquals(6,
+  result.eventIds.size() + result.failed, "All 6 inputs must be accounted for")`. This
+  exact-equality invariant assumes 1 ID per non-failed email; under multi-event a
+  non-failed email can contribute 2+ IDs, so `eventIds.size() + failed` can exceed 6.
+  Needs to become an inequality or be reworked to count at the per-email level.
+- `EmailIngestionTest.java:71,94` — `assertTrue(result.eventIds.isEmpty(), ...)` for
+  empty/blank input. **Checked, no change needed** — zero emails in still means zero
+  events out regardless of multi-event support.
+- `QueryAgentTest.java:63` — `assumeTrue(result.eventIds.size() >= 1, ...)`. **Checked,
+  no change needed** — already tolerant.
+- `NonLlmPipelineTest.java` — **checked, no change needed.** Never invokes the
+  email-parsing-agent or `EmailIngestionModule`; its one `ParsedEvent` reference
+  (`testParsedEventSerialization`, already updated last session for the silo/intent
+  fields) constructs the object directly and round-trips it — unaffected by how many
+  `ParsedEvent`s a real email produces.
+
+**Schema/index layer — checked, genuinely no ripple.** `FamilySchemaModule`'s stream
+topology (`FamilySchemaModule.java:137-182`) keys everything off `*record`'s own `id`
+field pulled from the depot (`Path.key("id")`, line 139) — it has no concept of "one
+email," only "one depot record." As long as each of the N events from one email gets
+appended as its own record with a unique `id`, every index ($$events-by-child/-category/
+-account/-date/-silo/-intent/-keyword) populates correctly with zero changes to this
+file. Worth stating explicitly since it significantly shrinks the actual blast radius
+versus what the ripple might have looked like.
+
+### Design decision — R1: multi-event extraction
+
+**Agent graph shape.** The task offered two framings: "per-event classify" vs
+"classify-then-split." I'm proposing a third, more specific option that satisfies R1's
+literal requirement ("each extracted event gets its own eventId, its own
+eventType/silo/intent classification") while minimizing LLM round-trips: **collapse
+`classify` and `extract-details` into a single node/prompt that returns a JSON array**,
+where each array element independently carries its own `category`/`silo`/`intent`/
+`title`/date-strings/`childName` — i.e., splitting and per-item classification happen
+in the same LLM call, not as two sequential passes. This is "per-event classify" in the
+sense that matters (each item's classification is independently determined, not
+inherited from a single whole-email guess) without paying for N+1 separate model
+invocations (a naive "split first, then classify each piece separately" design). I'm
+recommending this over a literal two-stage split-then-classify pipeline mainly on
+latency/cost/consistency grounds — happy to reconsider if there's a reason to prefer
+strict separation (e.g. wanting to unit-test "how many events" independently of "how are
+they classified").
+
+**Idempotency / eventId scheme — a problem the task didn't spell out but the code makes
+unavoidable.** Current scheme uses `gmailMessageId` directly as `eventId` for natural
+idempotency (reprocessing the same email overwrites the same record instead of
+duplicating it). Under multi-event, N items from one email can't all use the bare
+`gmailMessageId` — they'd collide. Proposing: `eventId = gmailMessageId + "#" + itemIndex`
+when `gmailMessageId` is present (stable, deterministic per item position, preserves
+idempotency on reprocessing), falling back to a fresh UUID per item when it isn't
+(matching today's fallback for the single-event case). This needs to be explicit in the
+plan since it's a correctness requirement, not a style choice — without it, R1 would
+silently drop events on the floor via last-write-wins.
+
+**Result-shape change**: `email-parsing-agent`'s terminal node changes from
+`agentNode.result(String)` to `agentNode.result(List<String>)` — for *every* invocation,
+including emails that turn out to have exactly one event, for type consistency (an agent
+node has one static signature; it can't conditionally return `String` sometimes and
+`List<String>` other times). This is the change that ripples into every caller listed in
+Phase A3 above.
+
+### Design decision — R2: deterministic dates
+
+**Root cause, from the actual prompt (`EmailParsingModule.java:205-214`), not
+guessed**: `extract-details` asks Gemini to free-form-convert prose ("Thursday, March
+20th") into a complete ISO-8601 datetime string, doing the day/month/year *and* the
+day-of-week disambiguation *and* any relative-date math in one LLM step, then Java's
+`parseIsoToEpoch` just parses whatever string comes back. All the actual date
+arithmetic happens inside the model's generation, which is exactly the kind of
+multi-step reasoning that varies run to run even at low temperature — this matches the
+task's own prior ("the less the LLM touches epoch math, the better").
+
+**Mechanism verified before proposing it**: `.temperature(Double)` and `.seed(Integer)`
+do exist on our pinned `langchain4j-google-ai-gemini:1.8.0` builder (confirmed by
+`javap`, see above) — but I'm not recommending them as the primary fix. Even at
+temperature 0 with a fixed seed, hosted LLM inference is not guaranteed bit-for-bit
+deterministic for multi-step reasoning (well-documented behavior across providers,
+not a langchain4j or Gemini-specific limitation) — it narrows variance, it doesn't
+guarantee it, and the acceptance gate requires identical epochs across 5 runs, not "less
+often different."
+
+**Recommended mechanism**: change the prompt to ask the LLM only for **discrete calendar
+components already present in the source text** — `year` (int or null — "assume 2026 if
+not stated," same anchoring rule already used), `month` (1-12), `day` (1-31), and `time`
+(24h `HH:mm` string or **null if the source text states no explicit clock time**) — then
+resolve `(year, month, day, time)` to an epoch in deterministic Java, anchored to the
+family's timezone. This directly reuses the proven pattern already in this codebase
+(`QueryModule.java:601-629`, `parseToEpochStartOfDay`/`parseToEpochEndOfDay`:
+`LocalDate.of(...).atStartOfDay(ZoneId.of(tz))`/`.atTime(h,m).atZone(ZoneId.of(tz))` →
+`.toInstant().toEpochMilli()`) rather than inventing a new date-resolution idiom. The
+LLM's job shrinks to "which digits are in this text" — much lower-entropy than full
+ISO-8601 synthesis — and Java owns 100% of the epoch math, satisfying the task's stated
+prior directly. This is the same mechanism that also solves R3 (below) for free, since
+"no explicit time" becomes a first-class, honestly-represented case instead of something
+the LLM has to guess a plausible-sounding value for.
+
+**Minor, in-scope-adjacent finding**: `extract-details`'s "today" anchor
+(`EmailParsingModule.java:204`, `LocalDate.now().toString()`) has no timezone attached,
+unlike `QueryModule.java:138-140`'s `interpret-query`, which explicitly does
+`Instant.now().atZone(ZoneId.of(timezone)).toLocalDate()`. Proposing to fix this
+inconsistency as part of R2's prompt rewrite (same file, same prompt, directly in scope)
+rather than leaving today's-date resolution itself as another latent source of
+off-by-one-day drift near midnight boundaries.
+
+### Design decision — R3: sane times
+
+**Root cause, from the code, not guessed**: `parseIsoToEpoch`
+(`EmailParsingModule.java:322-339`)'s middle fallback branch treats a *zoneless* ISO
+local-datetime string as UTC: `LocalDateTime.parse(iso).toInstant(ZoneOffset.UTC)`. If
+Gemini emits a zoneless local time that was actually meant as Pacific wall-clock time
+(e.g. a 9:00 AM departure), treating it as UTC shifts it back 7-8 hours — 9:00 AM
+Pacific becomes stored as 9:00 AM UTC, which displays as ~2:00 AM Pacific. This lines up
+exactly with the observed symptom across all three audit runs (1:00 AM / 2:00 AM PDT
+artifacts) and doesn't require guessing "the LLM just hallucinated a bad time" — the
+existing UTC-fallback assumption is sufficient to explain it on its own once the LLM's
+output lacks a zone suffix, which free-form ISO-8601 generation doesn't reliably include.
+
+**R2's mechanism dissolves this at the source**: since Java resolves `(year, month, day,
+time)` explicitly anchored to the family timezone (no zoneless-string guessing at all),
+this specific UTC-fallback bug can't recur for newly-extracted events — the ambiguous
+zoneless-parse branch in `parseIsoToEpoch` becomes dead code for the new path (I'd
+leave it in place only if anything else still calls `parseIsoToEpoch` with a raw string;
+if nothing does after the rewrite, removing it is a simplification I'd flag at
+implementation time, not decide now).
+
+**All-day representation — proposed, without breaking `$$events-by-date`**: when `time`
+is null (source stated no explicit clock time), store `startTime`/`deadline` as the
+epoch of **local midnight** for that calendar day in the family timezone (a perfectly
+normal `Long`, sorts and ranges through `$$events-by-date` exactly like today — a
+date-range query spanning that day still finds it via the existing
+`sortedMapRange`/`mapVals` mechanics, zero schema or index changes), plus a new boolean
+field on the event record, `allDay` (or similar), so **display code** can suppress the
+fabricated clock-time. **This is a real, unavoidable ripple into `DigestModule.java`
+(~216-244) and `QueryModule.java`'s `formatEventsForPrompt`/`formatEventsPlain`
+(~641-673)** — both currently always render `displayFmt.format(Instant.ofEpochMilli(...))`
+with a time-of-day baked into the format pattern. Without a small conditional there (skip
+the time portion / use a date-only formatter when `allDay` is true), the underlying data
+would be honestly represented but a human or the LLM-facing prompt text would still show
+a misleading "12:00 AM" for an all-day event — the exact class of bug R3 exists to kill,
+just relocated from "wrong time" to "fake midnight." Per the task's explicit "if R1's
+ripple forces a QueryModule touch, STOP and report" — flagging this now: this is a
+required, minimal, one-line-per-site conditional in two files nominally out of scope
+this session (`DigestModule`, `QueryModule`), not a redesign of either, and I'm not
+touching them without confirmation.
+
+### Nothing else contradicts the plan as given — proceeding to write it up.
+
+## Task 1 (approved, sequenced first) — GmailMessage fix + handoff correction
+
+Fixed all 5 remaining call sites using the existing `GmailMessageTestFixtures.fromRawBody(...)`
+pattern, matching the two already-fixed sites exactly:
+- `FamilyAssistantTest.java:86` and `:171` — wrapped the raw `rawEmail` String.
+- `EmailIngestionTest.java` (3 sites) — changed `List<String> inputs` to
+  `List<GmailMessage> inputs`, wrapping every raw string literal through
+  `GmailMessageTestFixtures.fromRawBody(...)`, including the blank/whitespace entries in
+  the mixed-batch test (still correctly skipped downstream since blank-checking reads
+  `msg.body.isBlank()`, unaffected by the wrapper).
+
+Verified: `mvn -o test-compile` clean; non-LLM suite still 111/111; full `@Tag("llm")`
+suite went from 6 errors + 1 failure to 1 error + 1 failure — the 6 `ClassCastException`s
+are gone (`FamilyAssistantTest` 4/4, `EmailIngestionTest` 5/5, both clean), leaving
+exactly the two issues already known and out of scope for this sub-task (March-20 date
+flake, executor-pool error).
+
+**`CLAUDE_HANDOFF.md` corrected**, not just the code: the original "RESOLVED — String vs
+GmailMessage" note only covered 2 of 5 sites — stated that plainly rather than silently
+extending it. Also corrected two other claims in the same file that my 3-run audit had
+already disproven before this sub-task started: the "all 4 QueryAgentTest passing"
+line (top summary + the compound-search RESOLVED section) and the "both ZooEmailTest
+tests passing" line — both were true of a single run, not the steady state. Added the
+LLM-tagged tests table rows for `EmailIngestionTest`/`FamilyAssistantTest`, which the
+original table omitted entirely despite them having 5 `@Tag("llm")` tests between them.
+
+**Executor-pool diagnosis (not a blind fix)**: traced the error to Rama's own
+`rpl.rama.distributed.util.executor_pool.SingleThreadExecutorPool` by decompiling
+`rama-1.5.0.jar` and grepping for the exact string `"Executor pool is shut down"` — it
+only exists in that jar, not in `agent-o-rama-0.8.0.jar`. Reached via
+`AgentNode.getMirrorAgentClient` → `AgentDeclaredObjectsTaskGlobal.getMirrorAgentClient`.
+Read that class's actual bundled `.java` source (present in the jar) to test my first
+hypothesis — a naive JVM-wide static cache colliding across test classes that reuse the
+same module name string — and that hypothesis is **wrong**: `_mirrorAgents` is a
+per-task `WorkerManagedResource`, freshly created in `prepareForTask`, not a shared
+static map. I did not chase this further into Rama's lower-level distributed/executor
+internals once it was clear that would mean decompiling substantially more of the
+platform to get a definitive answer, and the task explicitly said not to expand this
+session to chase a fix outside the classify/extract path once diagnosed. Reported the
+honest state in `CLAUDE_HANDOFF.md`: confirmed *where* it originates and *what it isn't*
+(not the naive hypothesis), left the exact trigger unresolved, flagged two candidate next
+steps (`reuseForks=false`, or an upstream question) for the user to scope separately.
+
+Nothing committed yet — about to commit this sub-task's work as its own commit, then
+stop for go-ahead before starting the parser work (R1/R2/R3), per the approved sequencing.

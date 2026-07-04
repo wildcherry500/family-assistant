@@ -16,10 +16,14 @@
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
 - **111/111 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
-- LLM-tagged suite (`QueryAgentTest`, `ZooEmailTest`) — all 4 `QueryAgentTest` rubric
-  assertions passing as of 2026-07-03 (compound search session). Can still flake on the
-  March-20 question due to an upstream, non-search issue — see "Known Issue: date
-  extraction non-determinism" below.
+- LLM-tagged suite: `EmailIngestionTest`/`FamilyAssistantTest` (5 tests) green as of the
+  2026-07-03 `GmailMessage`/`String` call-site fix. `QueryAgentTest` (4 tests) is flaky —
+  a 3-consecutive-run audit the same day showed 3/4, 2/4, 3/4, never 4/4 — root cause is
+  `EmailParsingModule` collapsing multiple real-world items per email plus non-deterministic
+  date extraction, being addressed next. `ZooEmailTest.testZooEmailExtraction` fails 100%
+  of the time for an unrelated, diagnosed-not-fixed test-infrastructure reason. See the
+  "LLM-tagged tests" table below for the full, corrected picture — the version of this
+  line that claimed "all 4 passing" was based on a single run and was wrong.
 
 ## GCP Project Situation (IMPORTANT)
 
@@ -136,10 +140,20 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ### LLM-tagged tests (`@Tag("llm")`, excluded by default — need `GEMINI_API_KEY`)
 
-| Test class | What it covers | Status |
-|---|---|---|
-| `QueryAgentTest` | Rubric-style `assertResponseContains` assertions on natural-language answers (zoo/field-trip fact, permission-slip date fact, March-20 fact) | **GREEN.** All 4 tests passing as of 2026-07-03 — see "RESOLVED: compound search" below. Can still flake on the March-20 question for a non-search reason — see "Known Issue: date extraction non-determinism" |
-| `ZooEmailTest` | Prints Gemini's extraction + digest output for the real zoo email fixture | Both tests passing; diagnostic cast bug fixed 2026-07-03 |
+**Correction (2026-07-03):** the row below for `QueryAgentTest`/`ZooEmailTest`
+previously said "GREEN, all passing" based on a single run. A 3-consecutive-run audit
+the same day showed `QueryAgentTest` never actually goes 4/4 (3/4, 2/4, 3/4 across the
+three runs) and `ZooEmailTest.testZooEmailExtraction` fails 100% of the time for a
+reason unrelated to search or extraction (see below). This table now also lists
+`EmailIngestionTest`/`FamilyAssistantTest`'s `@Tag("llm")` tests, which the original
+table omitted entirely.
+
+| Test class | Tests | What it covers | Status |
+|---|---|---|---|
+| `QueryAgentTest` | 4 | Rubric-style `assertResponseContains` assertions on natural-language answers (zoo/field-trip fact, permission-slip date fact, March-20 fact) | **Flaky, not green.** 3-run audit: 3/4, 2/4, 3/4. The permission-slip question failed in all 3 runs; the March-20 question failed in 1 of 3. Root cause: one email collapses two distinct real-world items (field trip + permission-slip deadline) into one `SCHOOL_EVENT` record, and `EmailParsingModule`'s date extraction is non-deterministic on which calendar day an event lands on. Not a search-agent defect — being addressed by the multi-event/date-determinism parser work (see "Next Task"). |
+| `ZooEmailTest` | 2 | Prints Gemini's extraction + digest output for the real zoo email fixture | `testZooEmailExtraction` fails 100% of the time (3/3 audit runs + 1 verification run) with `ExceptionInfo: Executor pool is shut down`, originating deep in Rama's `SingleThreadExecutorPool` / `AgentDeclaredObjectsTaskGlobal.getMirrorAgentClient` machinery — reproduced at the identical position in test-class execution order every time. Confirmed NOT a JVM-wide static-cache bug (read `AgentDeclaredObjectsTaskGlobal`'s actual source — its mirror-agent-client cache is per-task, not a naive global singleton), but something about `InProcessCluster` lifecycle across test classes in one Surefire JVM fork still trips it. Diagnosed, not fixed — root cause not fully pinned down, and unrelated to `EmailParsingModule`'s classify/extract logic. `testDigestAfterZooEmail` reports as passing but may be doing so vacuously if test 1's ingestion never completed. |
+| `EmailIngestionTest` | 3 | Mixed blank+valid batch, duplicate-email idempotency, malformed-batch resilience | **Green** as of the 2026-07-03 `GmailMessage`/`String` call-site fix (see above) — previously 100%-failing with `ClassCastException`, now 3/3 clean in the post-fix verification run. |
+| `FamilyAssistantTest` | 2 | `EmailParsingModule` writes to `$$family-data`; end-to-end email→digest | **Green** as of the same fix — previously 100%-failing with the same `ClassCastException`, now 2/2 clean. |
 
 ### Test resources
 - `src/test/resources/cohen_family_test_dataset_complete.json` — Cohen family 21-day dataset (18 messages: Feb 10–Mar 2, 2026)
@@ -151,12 +165,21 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 - When user says "checkpoint": update this file, then `git add -A && git commit -m "checkpoint" && git push origin master`
 - No automated hook exists in `~/.claude/settings.json` or project `settings.local.json` for this
 
-## RESOLVED (2026-07-03) — String vs GmailMessage ingestion mismatch
+## RESOLVED (2026-07-03, corrected 2026-07-03) — String vs GmailMessage ingestion mismatch
 
-`EmailIngestionModule`'s `ingest` node took `List<GmailMessage>`, but `QueryAgentTest` and
-`ZooEmailTest` still passed `List<String>` — fixed by adding
-`GmailMessageTestFixtures.fromRawBody(String)` (shared test helper) and switching both
-call sites to it. Production code untouched.
+`EmailIngestionModule`'s `ingest` node took `List<GmailMessage>`, but several tests still
+passed raw `String`/`List<String>` — fixed by adding
+`GmailMessageTestFixtures.fromRawBody(String)` (shared test helper) and switching call
+sites to it. Production code untouched.
+
+**Correction**: the note as originally written only covered 2 of 5 actual call sites
+(`QueryAgentTest`, `ZooEmailTest`). Three more were found still broken during a later
+audit — `FamilyAssistantTest.java:86,171` and `EmailIngestionTest.java:117,141,169` — all
+throwing the identical `ClassCastException: String cannot be cast to GmailMessage`,
+100% reproducible, not a flake. **All 5 call sites are now fixed** using the same
+`GmailMessageTestFixtures.fromRawBody(...)` pattern. Verified: non-LLM suite still
+111/111; full `@Tag("llm")` suite shows zero `ClassCastException`s where there were 6
+before.
 
 ## RESOLVED (2026-07-03) — Compound search: keyword index + two-tier search-agent
 
@@ -189,15 +212,42 @@ search over every index dimension:
   the previous single `parseToEpoch` used the same UTC midnight instant for both
   `dateFrom` and `dateTo`, making single-day range queries nearly always miss.
 
-**Result: all 4 `QueryAgentTest` rubric assertions pass** (previously 2 of 4 failed
-red-by-design). See "Known Issue: date extraction non-determinism" below for a remaining
-flake source that is NOT a search defect.
+**Result at the time: all 4 `QueryAgentTest` rubric assertions passed on that session's
+final run** (previously 2 of 4 failed red-by-design). **Correction (2026-07-03, later
+audit):** that single green run was not representative — a 3-consecutive-run audit the
+same day showed 3/4, 2/4, 3/4, never 4/4. The search-agent logic itself is not at fault
+(confirmed by direct evidence: in one failing run, the March-20 answer correctly surfaced
+the permission-slip deadline from the same record, proving the data and the date-range
+matching both worked — only the dedicated permission-slip question, which resolves to a
+SOFT-only filter with no HARD anchor, came up empty). See "Known Issue: date extraction
+non-determinism" below for why.
 
 ## RESOLVED (2026-07-03) — ZooEmailTest diagnostic cast bug
 
 `ZooEmailTest.testDigestAfterZooEmail` cast `startTime`/`deadline` to `String` and
 re-parsed as ISO-8601, but they're stored as `Long` epoch millis. Fixed — reads the `Long`
 values directly, no re-parsing.
+
+## Known Issue (2026-07-03) — ZooEmailTest "Executor pool is shut down" (diagnosed, not fixed)
+
+`ZooEmailTest.testZooEmailExtraction` fails 100% of the time (confirmed across 3 audit
+runs plus 1 later verification run — not a flake, deterministic given test execution
+order) with `clojure.lang.ExceptionInfo: Executor pool is shut down`, reached via
+`agentNode.getMirrorAgentClient(...)` → AOR's `AgentDeclaredObjectsTaskGlobal` →
+Rama's own `rpl.rama.distributed.util.executor_pool.SingleThreadExecutorPool` (confirmed
+by decompiling both jars — the string literal only appears in the pinned `rama-1.5.0.jar`,
+not agent-o-rama's). Ruled out the simplest hypothesis by reading
+`AgentDeclaredObjectsTaskGlobal`'s actual bundled source: its mirror-agent-client cache
+(`_mirrorAgents`) is a per-task `WorkerManagedResource`, not a naive JVM-wide static
+singleton, so it isn't simply "any two test classes that reuse a module name collide."
+The actual trigger is deeper in Rama's distributed-client/executor lifecycle and wasn't
+fully pinned down — reproduces at the same position in test-class execution order
+(right after `SearchAgentTest`, right before `DateIndexTest`) every run, suggesting
+something tied to `InProcessCluster` teardown from an earlier test class in the same
+Surefire JVM fork isn't cleanly isolated from a later class's fresh cluster. Not caused
+by, and not fixable within, `EmailParsingModule`'s classify/extract logic — flagged for
+separate scoping (candidate angles: `<reuseForks>false</reuseForks>` in the surefire
+plugin config to give each test class its own JVM, or an upstream Rama/AOR question).
 
 ## Known Issue (2026-07-03) — date extraction non-determinism (real, demonstrated, not fixed)
 

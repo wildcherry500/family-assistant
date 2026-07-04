@@ -106,11 +106,11 @@ public class EmailIngestionTest {
         assumeTrue(System.getProperty("GEMINI_API_KEY", System.getenv("GEMINI_API_KEY")) != null,
             "Skipping: GEMINI_API_KEY not set");
 
-        List<String> inputs = new ArrayList<>(Arrays.asList(
-            "",
-            "Field Trip to the Zoo\nPlease return permission slip by Friday.\nBring $5.",
-            "   ",
-            "Reminder: Science project due Monday."
+        List<GmailMessage> inputs = new ArrayList<>(Arrays.asList(
+            GmailMessageTestFixtures.fromRawBody(""),
+            GmailMessageTestFixtures.fromRawBody("Field Trip to the Zoo\nPlease return permission slip by Friday.\nBring $5."),
+            GmailMessageTestFixtures.fromRawBody("   "),
+            GmailMessageTestFixtures.fromRawBody("Reminder: Science project due Monday.")
         ));
 
         EmailIngestionModule.IngestionResult result =
@@ -135,7 +135,9 @@ public class EmailIngestionTest {
             "Skipping: GEMINI_API_KEY not set");
 
         String email = "Book Fair next Thursday in the school gym.";
-        List<String> inputs = new ArrayList<>(Arrays.asList(email, email));
+        List<GmailMessage> inputs = new ArrayList<>(Arrays.asList(
+            GmailMessageTestFixtures.fromRawBody(email),
+            GmailMessageTestFixtures.fromRawBody(email)));
 
         EmailIngestionModule.IngestionResult result =
             (EmailIngestionModule.IngestionResult) agent.invoke(inputs);
@@ -156,13 +158,13 @@ public class EmailIngestionTest {
         assumeTrue(System.getProperty("GEMINI_API_KEY", System.getenv("GEMINI_API_KEY")) != null,
             "Skipping: GEMINI_API_KEY not set");
 
-        List<String> inputs = new ArrayList<>(Arrays.asList(
-            "Normal school event email. Bake sale on April 5th.",
-            "!@#$%^&*()_+",                              // garbage
-            "a",                                          // single char
-            "<html><body>HTML email</body></html>",       // HTML
-            "Subject: \n\n",                             // headers only, empty body
-            "Another normal email. Deadline: turn in forms by March 31."
+        List<GmailMessage> inputs = new ArrayList<>(Arrays.asList(
+            GmailMessageTestFixtures.fromRawBody("Normal school event email. Bake sale on April 5th."),
+            GmailMessageTestFixtures.fromRawBody("!@#$%^&*()_+"),                              // garbage
+            GmailMessageTestFixtures.fromRawBody("a"),                                          // single char
+            GmailMessageTestFixtures.fromRawBody("<html><body>HTML email</body></html>"),       // HTML
+            GmailMessageTestFixtures.fromRawBody("Subject: \n\n"),                             // headers only, empty body
+            GmailMessageTestFixtures.fromRawBody("Another normal email. Deadline: turn in forms by March 31.")
         ));
 
         EmailIngestionModule.IngestionResult result =
