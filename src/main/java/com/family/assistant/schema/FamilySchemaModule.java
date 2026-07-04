@@ -1,11 +1,13 @@
 package com.family.assistant.schema;
 
+import com.family.assistant.util.EventUtils;
 import com.rpl.rama.Block;
 import com.rpl.rama.Depot;
 import com.rpl.rama.Expr;
 import com.rpl.rama.PState;
 import com.rpl.rama.Path;
 import com.rpl.rama.RamaModule;
+import com.rpl.rama.ops.Ops;
 
 import java.util.Map;
 
@@ -24,6 +26,7 @@ import java.util.Map;
  *   $$events-by-date     — familyId -> epochMs (sorted) -> Set<eventId>
  *   $$events-by-silo     — familyId -> silo (VAULT/OFFICE/STUDIO/UNKNOWN) -> Set<eventId>
  *   $$events-by-intent   — familyId -> intent (ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN) -> Set<eventId>
+ *   $$events-by-keyword  — familyId -> keyword (tokenized title+description+emailSubject) -> Set<eventId>
  *   $$leverage-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "weight"->Long }
  *   $$weakness-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "tag"->String, "note"->String }
  *
@@ -113,6 +116,12 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                     PState.setSchema(String.class)
                 ).subindexed()));
 
+        // Inverted index: familyId -> keyword -> Set<eventId>
+        stream.pstate("$$events-by-keyword",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.setSchema(String.class))));
+
         // Config: familyId -> entryId -> leverage entry (silo/intent -> weight)
         configStream.pstate("$$leverage-map",
             PState.mapSchema(String.class,
@@ -165,7 +174,12 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .ifTrue(new Expr((Long t) -> t != null, "*epochMs"),
               Block.localTransform("$$events-by-date",
                   Path.key("*familyId", "*epochMs")
-                      .nullToSet().voidSetElem().termVal("*eventId")));
+                      .nullToSet().voidSetElem().termVal("*eventId")))
+          // Tokenize title+description+emailSubject and fan out one write per token
+          .macro(Block.each(EventUtils::tokenizeEvent, "*record").out("*tokens"))
+          .macro(Block.each(Ops.EXPLODE, "*tokens").out("*token"))
+          .localTransform("$$events-by-keyword",
+              Path.key("*familyId").key("*token").nullToSet().voidSetElem().termVal("*eventId"));
 
         configStream.source("*weakness-leverage-config").out("*configRecord")
           .select("*configRecord", Path.key("familyId")).out("*familyId")

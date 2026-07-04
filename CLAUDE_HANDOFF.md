@@ -15,8 +15,11 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **95/95 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
-- LLM-tagged suite (`QueryAgentTest`, `ZooEmailTest`) currently blocked — see "Known Issue" below
+- **111/111 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
+- LLM-tagged suite (`QueryAgentTest`, `ZooEmailTest`) — all 4 `QueryAgentTest` rubric
+  assertions passing as of 2026-07-03 (compound search session). Can still flake on the
+  March-20 question due to an upstream, non-search issue — see "Known Issue: date
+  extraction non-determinism" below.
 
 ## GCP Project Situation (IMPORTANT)
 
@@ -68,6 +71,7 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | `$$events-by-date` | `familyId -> epochMs` (subindexed) | `Set<eventId>` | effectiveTime = startTime ?? deadline; null excluded |
 | `$$events-by-silo` | `familyId -> silo` | `Set<eventId>` | VAULT/OFFICE/STUDIO/UNKNOWN; UNKNOWN is indexed (correction-loop) |
 | `$$events-by-intent` | `familyId -> intent` | `Set<eventId>` | ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN; UNKNOWN is indexed |
+| `$$events-by-keyword` | `familyId -> keyword` | `Set<eventId>` | Tokenized `title`+`description`+`emailSubject` (lowercase, `[^a-z0-9]+` split, 3-char min, ~40-word stopword list). Populated via `Ops.EXPLODE` fan-out — see `RAMA_VERIFIED_LEARNINGS.md`. Read by `QueryModule`'s `search-agent` as the primary/HARD search dimension. |
 | `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
 | `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
 
@@ -112,17 +116,19 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (95 tests, all non-LLM)
+## Test Suite (111 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
 | `CohenFamilyDatasetTest` | 19 | Real 21-day dataset (13 email records), all indexes |
 | `IndexPStateTest` | 13 | Child/category index correctness |
+| `KeywordIndexTest` | 10 | `$$events-by-keyword` population — multi-field tokenization, case folding, stopwords, min-length, dedup, isolation |
 | `WeaknessLeverageMapTest` | 9 | `$$leverage-map`/`$$weakness-map` population, digest reordering, weakness annotation, graceful no-op |
 | `AccountLabelTest` | 8 | `$$events-by-account` index + DigestModule account filtering |
 | `SiloIntentIndexTest` | 8 | `$$events-by-silo`/`$$events-by-intent` population and isolation |
 | `QueryIndexTest` | 7 | `$$events-by-child` and `$$events-by-category` range assertions |
+| `SearchAgentTest` | 6 | `search-agent`'s two-tier hard/soft intersection — zero-dimension full scan, wrong-SOFT+right-HARD rescue, wrong-HARD+right-SOFT control (stays empty), HARD∩HARD genuine filtering, SOFT narrowing in the non-fallback path, all-SOFT-no-HARD-anchor stays empty |
 | `DateIndexTest` | 6 | `$$events-by-date` range queries, effectiveTime logic |
 | `EmailIngestionTest` | 2 | Batch fan-out, blank/null filtering |
 | `FamilyAssistantTest` | 2 | Schema module + depot smoke test |
@@ -132,8 +138,8 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 | Test class | What it covers | Status |
 |---|---|---|
-| `QueryAgentTest` | Rubric-style `assertResponseContains` assertions on natural-language answers (zoo/field-trip fact, permission-slip date fact) | **RED BY DESIGN.** Runs (ingestion bug fixed) but 2 of 4 fail — see "Executable Spec" below |
-| `ZooEmailTest` | Prints Gemini's extraction + digest output for the real zoo email fixture | Extraction test passes; digest test errors on a stale diagnostic cast, see Known Issue below |
+| `QueryAgentTest` | Rubric-style `assertResponseContains` assertions on natural-language answers (zoo/field-trip fact, permission-slip date fact, March-20 fact) | **GREEN.** All 4 tests passing as of 2026-07-03 — see "RESOLVED: compound search" below. Can still flake on the March-20 question for a non-search reason — see "Known Issue: date extraction non-determinism" |
+| `ZooEmailTest` | Prints Gemini's extraction + digest output for the real zoo email fixture | Both tests passing; diagnostic cast bug fixed 2026-07-03 |
 
 ### Test resources
 - `src/test/resources/cohen_family_test_dataset_complete.json` — Cohen family 21-day dataset (18 messages: Feb 10–Mar 2, 2026)
@@ -147,63 +153,79 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ## RESOLVED (2026-07-03) — String vs GmailMessage ingestion mismatch
 
-`EmailIngestionModule`'s `ingest` node (`EmailIngestionModule.java:68`) takes
-`List<GmailMessage>`, but two LLM-tagged tests — `QueryAgentTest.setup()` and
-`ZooEmailTest.testZooEmailExtraction` — still called
-`ingestionAgent.invoke(new ArrayList<>(List.of(rawEmailString)))`, passing `List<String>`.
-Both failed with `ClassCastException: String cannot be cast to GmailMessage`. Confirmed
-pre-existing (not caused by this session's Task 1/Task 2 work), and confirmed the fix
-belonged in the tests, not production: `EmailIngestionModule`'s signature stays as-is.
+`EmailIngestionModule`'s `ingest` node took `List<GmailMessage>`, but `QueryAgentTest` and
+`ZooEmailTest` still passed `List<String>` — fixed by adding
+`GmailMessageTestFixtures.fromRawBody(String)` (shared test helper) and switching both
+call sites to it. Production code untouched.
 
-**Fix:** added `GmailMessageTestFixtures.fromRawBody(String)` (new shared test helper,
-`src/test/java/com/family/assistant/`) and switched both call sites to it. Ingestion now
-succeeds end-to-end (`IngestionResult{parsed=1, skipped=0, failed=0}`).
+## RESOLVED (2026-07-03) — Compound search: keyword index + two-tier search-agent
 
-## Executable Spec — QueryAgentTest is RED BY DESIGN pending query/search wiring
+`QueryModule` used to pick a single `categoryFilter` guess and query one index bucket —
+when the guess was wrong (e.g. `PERMISSION_SLIP` for an event stored as `SCHOOL_EVENT`),
+it found nothing even though the event existed in `$$family-data`. Replaced with compound
+search over every index dimension:
 
-With ingestion fixed, `QueryAgentTest`'s rubric assertions actually run against a real
-answer instead of being blocked before they start — and **2 of 4 fail**, on purpose. This
-is not a regression to chase down; the old assertions only checked "not blank," so they
-were passing on useless answers the whole time. The new ones caught it:
+- **`$$events-by-keyword`** (new PState, `FamilySchemaModule`) — tokenized
+  `title`+`description`+`emailSubject`, populated via `Ops.EXPLODE` fan-out (one write per
+  token per event). See `RAMA_VERIFIED_LEARNINGS.md` for the jar-verified mechanism.
+- **`search-agent`** (new agent, inside `QueryModule` — not a new module):
+  `parse-filters → resolve-indexes → intersect → finalize`, entirely LLM-free. Callable
+  cross-module via `getMirrorAgentClient("QueryModule", "search-agent")` for future reuse
+  (not wired into `DigestModule` yet).
+- **Two-tier dimension model** in `intersect`: HARD (`keywords`, `dateRange`,
+  `accountLabel`) always applied, never dropped. SOFT (`childName`, `categoryFilter`,
+  `siloFilter`, `intentFilter`) applied normally when the full intersection is non-empty;
+  if it's empty AND at least one HARD dimension was present, SOFT dimensions are dropped
+  and only the HARD ones are re-intersected — a deterministic fallback, not a retry. If no
+  HARD dimension was present at all, an empty intersection stays empty (nothing to fall
+  back to). See `REASONING.md`'s "Plan correction — two-tier hard/soft filter" section for
+  the full design rationale and why naive "AND across everything" doesn't work.
+- `interpret-query`'s prompt now extracts a compound filter (keywords always populated —
+  empty array for pure date/time questions, never padded with generic words like
+  "activity"/"event") instead of one categoryFilter guess, and includes the same
+  year-anchoring rule as `EmailParsingModule` ("assume 2026 unless stated otherwise").
+- Date-range parsing (`parseToEpochStartOfDay`/`parseToEpochEndOfDay`, in `search-agent`)
+  computes a full calendar day *in the asker's timezone*, not a UTC zero-width instant —
+  the previous single `parseToEpoch` used the same UTC midnight instant for both
+  `dateFrom` and `dateTo`, making single-day range queries nearly always miss.
 
-| Question | Actual answer | Rubric verdict |
-|---|---|---|
-| What does Billy need for the field trip? | "I didn't find any events matching your question for Billy." | Not asserted (fixture never names a child "Billy" — likely a correct "not found") |
-| When is the next permission slip due? | "I didn't find any events matching your question." | **FAILS** — expected one of `["March 16", "3/16", "16th"]` |
-| What is happening on March 20th? | "I didn't find any events matching your question." | **FAILS** — expected one of `["zoo", "Woodland Park", "field trip"]` |
-| Do I need to pick up Billy from school? | "I didn't find any events matching your question for Billy." | Not asserted (same fixture mismatch as above) |
+**Result: all 4 `QueryAgentTest` rubric assertions pass** (previously 2 of 4 failed
+red-by-design). See "Known Issue: date extraction non-determinism" below for a remaining
+flake source that is NOT a search defect.
 
-Root cause (read, not fixed — `QueryModule` filter wiring is out of scope until the next
-session): the whole `ZOO_EMAIL` fixture collapses into **one** event with
-`eventType=SCHOOL_EVENT`. `QueryModule`'s LLM query-parser can independently choose
-`categoryFilter=PERMISSION_SLIP` for the permission-slip question; since
-`$$events-by-category`'s `PERMISSION_SLIP` bucket is empty for this event (only
-`SCHOOL_EVENT` is indexed), that filter alone zeroes out the candidate set even though a
-relevant event exists. This is a real single-event/multiple-topics tension between how
-emails get classified and how the query parser picks a single category filter.
+## RESOLVED (2026-07-03) — ZooEmailTest diagnostic cast bug
 
-**These two failing assertions are now the executable spec for the query/search-wiring
-session.** When `testWhenIsNextPermissionSlipDue` and `testWhatIsHappeningOnMarch20` go
-green, that work is done — no separate acceptance criteria needed.
+`ZooEmailTest.testDigestAfterZooEmail` cast `startTime`/`deadline` to `String` and
+re-parsed as ISO-8601, but they're stored as `Long` epoch millis. Fixed — reads the `Long`
+values directly, no re-parsing.
 
-## Known Issue (2026-07-03) — ZooEmailTest diagnostic cast bug
+## Known Issue (2026-07-03) — date extraction non-determinism (real, demonstrated, not fixed)
 
-`ZooEmailTest.testDigestAfterZooEmail` (line 172) does
-`String startTime = (String) ev.get("startTime")`, but the schema stores `startTime` as
-`Long` (see PState Schema table above). Crashes with `ClassCastException` before the test
-reaches `digestAgent.invoke(...)` or any real assertion — stale print-debugging code, not
-related to the GmailMessage fix. Not fixed this session; low priority (diagnostic-only
-code path), but note it before trusting this test's digest output next time.
+`EmailParsingModule`'s date extraction is measurably non-deterministic on *which calendar
+day* it lands an event on, not just the exact time-of-day. Across several ingestion runs
+of the identical `ZOO_EMAIL` fixture (which explicitly says "Thursday, March 20th"), the
+stored `startTime` landed on **March 19** in Pacific time on some runs and **March 20** on
+others — confirmed directly via debug output and the generated answer text ("Thursday,
+March 19 at 5:00 PM PDT" vs "Friday, March 20th at 2:00 AM PDT") across otherwise-identical
+runs with no code changes in between. `search-agent`'s date-range logic is correct given
+whatever epoch value it receives — this is upstream, in `EmailParsingModule`'s own
+extraction (out of scope this session; touching the classify/extract prompt was
+explicitly forbidden). This is a wider-blast-radius version of the already-known "one
+email = one event" parser-granularity issue — it affects any question or feature whose
+correctness depends on which side of a day boundary an event's `startTime` lands,
+including future digest-window features, not just `QueryModule`.
 
 ## Next Task
 
-**SearchIndexModule** — full-text / keyword search index over event titles and descriptions, backed by a new PState in FamilySchemaModule. Prompt and design details to be provided at session start.
-
-When picking this up: `QueryAgentTest`'s two failing rubric assertions (see "Executable
-Spec" above) define done for the query-wiring half of this work — fix the
-categoryFilter/single-event tension, confirm both go green, and consider whether
-`ZooEmailTest.java:172`'s cast bug should be fixed in the same pass since you'll already
-be looking at this fixture's data shape.
+**Multi-event extraction in `EmailParsingModule`** — one email currently always yields
+exactly one event, even when it describes several distinct things (e.g. the zoo trip
+fixture bundles a permission slip deadline, a field trip, a picture day, and a pickup-time
+change into a single `SCHOOL_EVENT` record). This is the deferred half of the
+permission-slip root cause the previous session flagged, and it's also where the
+date-extraction non-determinism above should be investigated and fixed, since both live
+in the same `extract-details`/classify path. Do not touch this without a design session —
+splitting one email into N events changes the depot/PState write shape and needs its own
+plan.
 
 ---
 

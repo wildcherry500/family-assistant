@@ -170,16 +170,10 @@ public class ZooEmailTest {
         } else {
             for (Map.Entry<String, Object> entry : events.entrySet()) {
                 Map<String, Object> ev = (Map<String, Object>) entry.getValue();
-                String startTime = (String) ev.get("startTime");
-                String deadline  = (String) ev.get("deadline");
-                long startEpoch = startTime != null
-                    ? java.time.Instant.parse(startTime.length() == 19 ? startTime + "Z" : startTime).toEpochMilli()
-                    : -1;
-                long deadlineEpoch = deadline != null
-                    ? java.time.Instant.parse(deadline.length() == 19 ? deadline + "Z" : deadline).toEpochMilli()
-                    : -1;
-                System.out.printf("  startTime=%-25s  epochMs=%d%n", startTime, startEpoch);
-                System.out.printf("  deadline =%-25s  epochMs=%d%n", deadline, deadlineEpoch);
+                Long startTime = (Long) ev.get("startTime");
+                Long deadline  = (Long) ev.get("deadline");
+                System.out.printf("  startTime=%-15s  epochMs=%d%n", startTime, startTime != null ? startTime : -1);
+                System.out.printf("  deadline =%-15s  epochMs=%d%n", deadline, deadline != null ? deadline : -1);
             }
         }
 

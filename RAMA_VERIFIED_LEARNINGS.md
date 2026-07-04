@@ -103,6 +103,47 @@ Confirmed: every test file in `src/test/java` uses `InProcessCluster.create()`.
 Production (`FamilyAssistantApp`) uses `RamaClusterManager.open()` per
 `CLAUDE_HANDOFF.md`'s Phase 2 migration notes. Do not mix the two.
 
+### `Ops.EXPLODE` — fan-out one list into N downstream emits, verified against the 1.5.0 jar
+Verified 2026-07-03 two ways: (1) `redplanetlabs.com/docs/~/intermediate-dataflow.html`
+describes an `explode` operation that "emits one time for each element of the list"; (2)
+decompiled `com.rpl.rama.ops.Ops` from the pinned
+`/Volumes/CORSAIR/.m2/repository/com/rpl/rama/1.5.0/rama-1.5.0.jar` with `javap` and
+confirmed `Ops.EXPLODE`, `Ops.EXPLODE_INDEXED`, `Ops.EXPLODE_MAP` all exist as
+`NativeRamaOperation1<Object>` static fields — i.e. this is not a docs-only/newer-version
+feature, it's present in our exact pinned dependency.
+
+**Important:** `Block`'s own static factories only expose `explodeMaterialized(String)`
+and `explodeMicrobatch(String)` — narrower, context-specific variants. The general
+list-fan-out is NOT one of those; it's `Ops.EXPLODE` used through `Block`'s existing
+`.each(RamaOperation1<T0>, Object)` overload (confirmed `NativeRamaOperation1<T0>
+implements RamaOperation1<T0>`, so `Ops.EXPLODE` type-matches that overload), which
+returns `Block$MultiOutImpl` — chain `.out(String...)` from there (confirmed on
+`Block$Out`, inherited by `Block$OutImpl`/`Block$MultiOutImpl`). Verified call shape:
+
+```java
+.macro(Block.each(Ops.EXPLODE, "*tokenList").out("*token"))
+```
+
+Per the docs, this emits once per element of `*tokenList`, continuing the downstream
+topology once per emission — the mechanism for one input record (e.g. one event) to
+write N index entries (one per keyword token) in a single stream-topology pass. Not yet
+exercised by a passing test in this repo — first real use is the planned
+`$$events-by-keyword` index.
+
+### `agentNode.getAgentClient(String)` — same-module agent-to-agent invocation, verified against the 0.8.0 jar
+Verified 2026-07-03 against `/Volumes/CORSAIR/.m2/repository/com/rpl/agent-o-rama/0.8.0/agent-o-rama-0.8.0.jar`
+with `javap`: `com.rpl.agentorama.AgentNode` extends
+`com.rpl.agentorama.impl.IFetchAgentClient`, which declares
+`AgentClient getAgentClient(String)` — distinct from `getMirrorAgentClient(String, String)`
+(cross-module, two-arg, already used by `EmailIngestionModule` → `EmailParsingModule`).
+`getAgentClient` takes just the agent name because it resolves an agent defined in the
+**same module's** topology. Cross-checked against
+`docs/Agent_O_Rama_Complete_Documentation.md` (lines ~3688-3702, the `TextProcessor`/
+`MainAgent` example, and ~3741-3750, `Factorial`'s self-recursive-call example) — same
+method name and same one-arg same-module semantics as the decompiled interface. Not yet
+exercised by a passing test in this repo; first real use is the planned `search-agent`
+(inside `QueryModule`) being invoked from `query-agent`'s fetch-data node.
+
 ---
 
 ## Unverified — do not use without confirming
