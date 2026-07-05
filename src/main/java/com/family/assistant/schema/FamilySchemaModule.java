@@ -20,6 +20,9 @@ import java.util.Map;
  *
  * Schema:
  *   $$family-data        — familyId -> { "events" -> { eventId -> { ...record... } } }
+ *   $$raw-emails         — familyId -> gmailMessageId -> { ...complete raw email... }
+ *                          (write-ahead log; the *raw-emails depot is the durable
+ *                           replay source, this PState is the inspectable view)
  *   $$events-by-child    — familyId -> childName  -> Set<eventId>
  *   $$events-by-category — familyId -> eventType  -> Set<eventId>
  *   $$events-by-account  — familyId -> accountLabel -> Set<eventId>
@@ -69,12 +72,24 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
     public void define(Setup setup, Topologies topologies) {
         setup.declareDepot("*family-events", Depot.hashBy("familyId"));
         setup.declareDepot("*weakness-leverage-config", Depot.hashBy("familyId"));
+        // Write-ahead log for raw ingested emails. hashBy("familyId") keeps the raw
+        // record co-partitioned with *family-events; requires the appended record to
+        // be a Map carrying a "familyId" key (Chat-o-rama 2026-03-11: the hashBy(String)
+        // overload looks up the key from the record, which must implement Map).
+        setup.declareDepot("*raw-emails", Depot.hashBy("familyId"));
 
         var stream = topologies.stream("family-events-stream");
         var configStream = topologies.stream("weakness-leverage-config-stream");
+        var rawStream = topologies.stream("raw-emails-stream");
 
         // Primary store
         stream.pstate("$$family-data",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class, Object.class))));
+
+        // Write-ahead log view: familyId -> gmailMessageId -> raw email record
+        rawStream.pstate("$$raw-emails",
             PState.mapSchema(String.class,
                 PState.mapSchema(String.class,
                     PState.mapSchema(String.class, Object.class))));
@@ -180,6 +195,18 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .macro(Block.each(Ops.EXPLODE, "*tokens").out("*token"))
           .localTransform("$$events-by-keyword",
               Path.key("*familyId").key("*token").nullToSet().voidSetElem().termVal("*eventId"));
+
+        // Drain the raw-email write-ahead log into the inspectable $$raw-emails view.
+        // Keyed by gmailMessageId (present on every real Gmail message). The depot
+        // itself remains the complete, append-only replay source; records lacking a
+        // gmailMessageId still land durably in the depot but are not surfaced here.
+        rawStream.source("*raw-emails").out("*raw")
+          .select("*raw", Path.key("familyId")).out("*familyId")
+          .select("*raw", Path.key("gmailMessageId")).out("*rawId")
+          .hashPartition("*familyId")
+          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*rawId"),
+              Block.localTransform("$$raw-emails",
+                  Path.key("*familyId").key("*rawId").termVal("*raw")));
 
         configStream.source("*weakness-leverage-config").out("*configRecord")
           .select("*configRecord", Path.key("familyId")).out("*familyId")

@@ -4,6 +4,7 @@ import com.family.assistant.gmail.GmailMessage;
 import com.rpl.agentorama.AgentModule;
 import com.rpl.agentorama.AgentNode;
 import com.rpl.agentorama.AgentTopology;
+import com.rpl.rama.AckLevel;
 import com.rpl.rama.Depot;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
@@ -126,6 +127,41 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         // Graph: classify → extract-details → write-to-store → finalize
         // ------------------------------------------------------------------
         topology.newAgent("email-parsing-agent")
+
+            // ----------------------------------------------------------------
+            // Node 0: persist-raw  (write-ahead log — runs before any parsing)
+            // Input:  GmailMessage message  (agent entry point)
+            // Output: emits the unchanged message to classify
+            //
+            // Durably appends the complete raw email to FamilySchemaModule's
+            // *raw-emails depot BEFORE parsing, so a future reparse-on-replay can
+            // regenerate every PState from the original input. Appended as a Map
+            // carrying familyId so the depot's hashBy("familyId") co-partitions it
+            // with *family-events. Append-only by design; parsed-event idempotency
+            // is unaffected because events key on gmailMessageId in write-to-store.
+            // ----------------------------------------------------------------
+            .node("persist-raw", "classify",
+                (AgentNode agentNode, GmailMessage message) -> {
+
+                    String familyId = (String) agentNode.getAgentObject("family-id");
+
+                    Map<String, Object> raw = new HashMap<>();
+                    raw.put("familyId",       familyId);
+                    raw.put("body",           message.body);
+                    raw.put("emailSubject",   message.emailSubject);
+                    raw.put("senderEmail",    message.senderEmail);
+                    raw.put("senderName",     message.senderName);
+                    raw.put("gmailMessageId", message.gmailMessageId);
+                    raw.put("accountLabel",   message.accountLabel);
+                    raw.put("receivedAt",     message.receivedAt);
+
+                    Depot rawDepot = agentNode.getMirrorDepot("FamilySchemaModule", "*raw-emails");
+                    // APPEND_ACK: block until the raw record is durably appended and
+                    // replicated before parsing proceeds ("write-ahead" semantics).
+                    rawDepot.append(raw, AckLevel.APPEND_ACK);
+
+                    agentNode.emit("classify", message);
+                })
 
             // ----------------------------------------------------------------
             // Node 1: classify
