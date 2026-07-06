@@ -55,8 +55,8 @@ public class CohenFamilyDatasetTest {
 
         familyEventsDepot = ipc.clusterDepot(schemaModule.getModuleName(), "*family-events");
         familyData        = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
-        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-child");
-        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-category");
+        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
+        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
 
         seedFromDataset();
         Thread.sleep(2500);
@@ -107,9 +107,12 @@ public class CohenFamilyDatasetTest {
             record.put("familyId",    FAMILY_ID);
             record.put("title",       subject);
             record.put("description", body);
-            record.put("eventType",   eventType);
-            record.put("childName",   childName);
-            record.put("childId",     childName != null ? childName.toLowerCase() : null);
+            List<String> tags = new ArrayList<>();
+            if (eventType != null) tags.add(eventType);
+            record.put("tags",        tags);
+            List<String> personId = new ArrayList<>();
+            if (childName != null) personId.add(childName);
+            record.put("personId",    personId);
             record.put("startTime",   startTime);
             record.put("deadline",    deadline);
             record.put("urgency",     urgency);
@@ -195,9 +198,9 @@ public class CohenFamilyDatasetTest {
         assertNotNull(record, "email_0004 (IEP Annual Review) should exist in $$family-data");
         assertTrue(((String) record.get("title")).contains("IEP"),
             "Title should contain 'IEP'");
-        assertEquals("PERMISSION_SLIP", record.get("eventType"),
+        assertTrue(((List<?>) record.get("tags")).contains("PERMISSION_SLIP"),
             "IEP meeting (admin + school_elementary + action_required) → PERMISSION_SLIP");
-        assertEquals("Maya",     record.get("childName"));
+        assertTrue(((List<?>) record.get("personId")).contains("Maya"));
         assertEquals("critical", record.get("urgency"));
         assertNotNull(record.get("startTime"), "startTime should be parsed from timestamp field");
         assertNotNull(record.get("deadline"),  "deadline should be parsed from action_deadline field");
@@ -214,7 +217,7 @@ public class CohenFamilyDatasetTest {
     }
 
     // =========================================================================
-    // 3. $$events-by-child — Maya and Josh both indexed
+    // 3. $$events-by-person — Maya and Josh both indexed
     // =========================================================================
 
     @Test @Order(10)
@@ -223,7 +226,7 @@ public class CohenFamilyDatasetTest {
         Set<String> mayaEvents = (Set<String>)
             eventsByChild.selectOne(Path.key(FAMILY_ID).key("Maya"));
 
-        assertNotNull(mayaEvents, "$$events-by-child should have a 'Maya' entry");
+        assertNotNull(mayaEvents, "$$events-by-person should have a 'Maya' entry");
         assertFalse(mayaEvents.isEmpty(), "Maya's event set should be non-empty");
         assertTrue(mayaEvents.contains("email_0002"),
             "email_0002 (weekly newsletter, child=Maya) should be in Maya's set");
@@ -239,7 +242,7 @@ public class CohenFamilyDatasetTest {
         Set<String> joshEvents = (Set<String>)
             eventsByChild.selectOne(Path.key(FAMILY_ID).key("Josh"));
 
-        assertNotNull(joshEvents, "$$events-by-child should have a 'Josh' entry");
+        assertNotNull(joshEvents, "$$events-by-person should have a 'Josh' entry");
         assertFalse(joshEvents.isEmpty(), "Josh's event set should be non-empty");
         assertTrue(joshEvents.contains("email_0005"),
             "email_0005 (graduation deadlines, child=Josh) should be in Josh's set");
@@ -255,8 +258,8 @@ public class CohenFamilyDatasetTest {
         Object bothEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key("Both"));
         Object noneEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key("None"));
 
-        assertNull(bothEntry, "'Both' must not be a key in $$events-by-child");
-        assertNull(noneEntry, "'None' must not be a key in $$events-by-child");
+        assertNull(bothEntry, "'Both' must not be a key in $$events-by-person");
+        assertNull(noneEntry, "'None' must not be a key in $$events-by-person");
     }
 
     @Test @Order(13)
@@ -273,7 +276,7 @@ public class CohenFamilyDatasetTest {
     }
 
     // =========================================================================
-    // 4. $$events-by-category — SCHOOL_EVENT, PERMISSION_SLIP, TASK, UNKNOWN
+    // 4. $$events-by-tag — SCHOOL_EVENT, PERMISSION_SLIP, TASK, UNKNOWN
     // =========================================================================
 
     @Test @Order(20)
@@ -282,7 +285,7 @@ public class CohenFamilyDatasetTest {
         Set<String> schoolEvents = (Set<String>)
             eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
 
-        assertNotNull(schoolEvents, "SCHOOL_EVENT should exist in $$events-by-category");
+        assertNotNull(schoolEvents, "SCHOOL_EVENT should exist in $$events-by-tag");
         assertFalse(schoolEvents.isEmpty(), "SCHOOL_EVENT set should be non-empty");
         assertTrue(schoolEvents.contains("email_0001"),
             "email_0001 (Mid-Winter Break reminder, admin+school_district) → SCHOOL_EVENT");
@@ -296,7 +299,7 @@ public class CohenFamilyDatasetTest {
         Set<String> permSlipEvents = (Set<String>)
             eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
 
-        assertNotNull(permSlipEvents, "PERMISSION_SLIP should exist in $$events-by-category");
+        assertNotNull(permSlipEvents, "PERMISSION_SLIP should exist in $$events-by-tag");
         assertFalse(permSlipEvents.isEmpty(), "PERMISSION_SLIP set should be non-empty");
         assertTrue(permSlipEvents.contains("email_0004"),
             "email_0004 (IEP meeting, admin+school+action_required) → PERMISSION_SLIP");
@@ -313,7 +316,7 @@ public class CohenFamilyDatasetTest {
         Set<String> taskEvents = (Set<String>)
             eventsByCategory.selectOne(Path.key(FAMILY_ID).key("TASK"));
 
-        assertNotNull(taskEvents, "TASK should exist in $$events-by-category");
+        assertNotNull(taskEvents, "TASK should exist in $$events-by-tag");
         assertTrue(taskEvents.contains("email_0009"),
             "email_0009 (shift swap, work source) → TASK");
         assertTrue(taskEvents.contains("email_0017"),
@@ -327,7 +330,7 @@ public class CohenFamilyDatasetTest {
         Set<String> unknownEvents = (Set<String>)
             eventsByCategory.selectOne(Path.key(FAMILY_ID).key("UNKNOWN"));
 
-        assertNotNull(unknownEvents, "UNKNOWN should exist in $$events-by-category (religious emails)");
+        assertNotNull(unknownEvents, "UNKNOWN should exist in $$events-by-tag (religious emails)");
         assertTrue(unknownEvents.contains("email_0010"),
             "email_0010 (Shabbat Shalom, religious) → UNKNOWN");
         assertTrue(unknownEvents.contains("email_0018"),

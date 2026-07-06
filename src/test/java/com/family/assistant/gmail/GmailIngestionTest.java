@@ -100,7 +100,7 @@ public class GmailIngestionTest {
                 Map<String, Object> r = (Map<String, Object>) record;
                 System.out.printf("  [%s] type=%-20s title=%s%n",
                     eventId.substring(0, 8),
-                    r.get("eventType"),
+                    r.get("tags"),
                     r.get("title"));
             });
             assertTrue(events.size() > 0, "At least one event should be written to $$family-data");

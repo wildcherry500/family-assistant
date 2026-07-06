@@ -14,7 +14,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -301,14 +303,37 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
 
                     String familyId = (String) agentNode.getAgentObject("family-id");
 
+                    // tags: List<String> replacing the single-value eventType. This session the
+                    // classifier still emits one category, so tags carries 0..1 element; the List
+                    // shape is what lets a later parser attach several (e.g. PERMISSION_SLIP + DEADLINE).
+                    List<String> tags = new ArrayList<>();
+                    if (event.category != null && !event.category.isBlank()) {
+                        tags.add(event.category);
+                    }
+
+                    // personId: List<String> replacing childId/childName. This session it carries the
+                    // extracted child *name* (0..1 element) until an id-resolver is built; the List shape
+                    // is what lets a later parser tag every family member (senders and subjects both).
+                    List<String> personId = new ArrayList<>();
+                    if (event.childName != null && !event.childName.isBlank()) {
+                        personId.add(event.childName);
+                    }
+
                     Map<String, Object> eventRecord = new HashMap<>();
                     eventRecord.put("id",             eventId);
                     eventRecord.put("familyId",       familyId);
-                    eventRecord.put("childId",        event.childId);
-                    eventRecord.put("childName",      event.childName);
+                    eventRecord.put("personId",       personId);
                     eventRecord.put("sourceType",     "email");
                     eventRecord.put("accountLabel",   event.accountLabel);
-                    eventRecord.put("eventType",      event.category);
+                    eventRecord.put("tags",           tags);
+                    // Classifier-output fields — schema only this session. Plumbed into the record and
+                    // serialization but NOT populated by the parsing agent; null/empty is the correct
+                    // passing state until the classifier is wired to fill them. confidence is a Double
+                    // (never Integer) for serialization consistency.
+                    eventRecord.put("documentType",    (String) null);
+                    eventRecord.put("relatedEventIds", new ArrayList<String>());
+                    eventRecord.put("confidence",      (Double) null);
+                    eventRecord.put("reason",          (String) null);
                     eventRecord.put("silo",           event.silo);
                     eventRecord.put("intent",         event.intent);
                     eventRecord.put("title",          event.title);

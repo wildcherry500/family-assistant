@@ -114,11 +114,14 @@ public class NonLlmPipelineTest {
         event.put("id", id);
         event.put("familyId", familyId);
         event.put("title", title);
-        event.put("eventType", eventType);
+        List<String> tags = new ArrayList<>();
+        if (eventType != null) tags.add(eventType);
+        event.put("tags", tags);
         event.put("startTime", startTime);
         event.put("deadline", deadline);
-        event.put("childName", childName);
-        event.put("childId", childName != null ? childName.toLowerCase() : null);
+        List<String> personId = new ArrayList<>();
+        if (childName != null) personId.add(childName);
+        event.put("personId", personId);
         event.put("status", status);
         event.put("description", description);
         event.put("sourceType", "email");
@@ -149,10 +152,10 @@ public class NonLlmPipelineTest {
 
         assertNotNull(event, "evt-001 should exist");
         assertEquals("Zoo Field Trip", event.get("title"));
-        assertEquals("SCHOOL_EVENT", event.get("eventType"));
+        assertTrue(((List<?>) event.get("tags")).contains("SCHOOL_EVENT"));
         assertEquals(MAR_20, event.get("startTime"));
         assertNull(event.get("deadline"));
-        assertEquals("Billy", event.get("childName"));
+        assertTrue(((List<?>) event.get("personId")).contains("Billy"));
         assertEquals("pending", event.get("status"));
     }
 

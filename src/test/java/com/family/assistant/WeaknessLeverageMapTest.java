@@ -11,7 +11,9 @@ import com.rpl.rama.test.InProcessCluster;
 import com.rpl.rama.test.LaunchConfig;
 import org.junit.jupiter.api.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -103,13 +105,14 @@ public class WeaknessLeverageMapTest {
         event.put("id",          id);
         event.put("familyId",    familyId);
         event.put("title",       "Test event " + id);
-        event.put("eventType",   "TASK");
+        List<String> tags = new ArrayList<>();
+        tags.add("TASK");
+        event.put("tags",        tags);
         event.put("silo",        silo);
         event.put("intent",      intent);
         event.put("startTime",   startTime);
         event.put("deadline",    null);
-        event.put("childName",   null);
-        event.put("childId",     null);
+        event.put("personId",    new ArrayList<String>());
         event.put("status",      "pending");
         event.put("description", "Test event " + id);
         event.put("sourceType",  "test");

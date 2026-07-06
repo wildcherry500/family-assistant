@@ -75,9 +75,10 @@ public class DateIndexTest {
         record.put("id",          id);
         record.put("familyId",    FAMILY_ID);
         record.put("title",       "Test event " + id);
-        record.put("eventType",   "SCHOOL_EVENT");
-        record.put("childName",   null);
-        record.put("childId",     null);
+        List<String> tags = new ArrayList<>();
+        tags.add("SCHOOL_EVENT");
+        record.put("tags",        tags);
+        record.put("personId",    new ArrayList<String>());
         record.put("startTime",   startTime);
         record.put("deadline",    deadline);
         record.put("status",      "pending");

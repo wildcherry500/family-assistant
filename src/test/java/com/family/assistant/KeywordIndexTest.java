@@ -8,7 +8,9 @@ import com.rpl.rama.test.InProcessCluster;
 import com.rpl.rama.test.LaunchConfig;
 import org.junit.jupiter.api.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -83,13 +85,14 @@ public class KeywordIndexTest {
         event.put("title",         title);
         event.put("description",   description);
         event.put("emailSubject",  emailSubject);
-        event.put("eventType",     "TASK");
+        List<String> tags = new ArrayList<>();
+        tags.add("TASK");
+        event.put("tags",          tags);
         event.put("silo",          "VAULT");
         event.put("intent",        "FYI");
         event.put("startTime",     null);
         event.put("deadline",      null);
-        event.put("childName",     null);
-        event.put("childId",       null);
+        event.put("personId",      new ArrayList<String>());
         event.put("status",        "pending");
         event.put("sourceType",    "test");
         event.put("accountLabel",  null);

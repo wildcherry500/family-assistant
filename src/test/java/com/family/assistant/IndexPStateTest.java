@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * IndexPStateTest
  *
  * Verifies that FamilySchemaModule correctly populates the two inverted index
- * PStates ($$events-by-child and $$events-by-category) when events are appended
+ * PStates ($$events-by-person and $$events-by-tag) when events are appended
  * to the *family-events depot.
  *
  * No GEMINI_API_KEY required — this test does NOT use any LLM.
@@ -41,8 +41,8 @@ public class IndexPStateTest {
         ipc.launchModule(schemaModule, new LaunchConfig(1, 1));
 
         familyEventsDepot = ipc.clusterDepot(MODULE_NAME, "*family-events");
-        eventsByChild     = ipc.clusterPState(MODULE_NAME, "$$events-by-child");
-        eventsByCategory  = ipc.clusterPState(MODULE_NAME, "$$events-by-category");
+        eventsByChild     = ipc.clusterPState(MODULE_NAME, "$$events-by-person");
+        eventsByCategory  = ipc.clusterPState(MODULE_NAME, "$$events-by-tag");
 
         // evt-A: Billy, SCHOOL_EVENT
         appendEvent("evt-A", FAMILY_ID, "Billy", "SCHOOL_EVENT");
@@ -69,13 +69,17 @@ public class IndexPStateTest {
         Map<String, Object> event = new HashMap<>();
         event.put("id", id);
         event.put("familyId", familyId);
-        event.put("childName", childName);
-        event.put("eventType", eventType);
+        List<String> personId = new ArrayList<>();
+        if (childName != null) personId.add(childName);
+        event.put("personId", personId);
+        List<String> tags = new ArrayList<>();
+        if (eventType != null) tags.add(eventType);
+        event.put("tags", tags);
         familyEventsDepot.append(event);
     }
 
     // =======================================================================
-    // $$events-by-child
+    // $$events-by-person
     // =======================================================================
 
     @Test
@@ -143,7 +147,7 @@ public class IndexPStateTest {
     }
 
     // =======================================================================
-    // $$events-by-category
+    // $$events-by-tag
     // =======================================================================
 
     @Test

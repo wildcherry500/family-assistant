@@ -126,9 +126,44 @@ returns `Block$MultiOutImpl` — chain `.out(String...)` from there (confirmed o
 
 Per the docs, this emits once per element of `*tokenList`, continuing the downstream
 topology once per emission — the mechanism for one input record (e.g. one event) to
-write N index entries (one per keyword token) in a single stream-topology pass. Not yet
-exercised by a passing test in this repo — first real use is the planned
-`$$events-by-keyword` index.
+write N index entries (one per keyword token) in a single stream-topology pass. Now
+exercised by passing tests as of 2026-07-05: `$$events-by-keyword` (`KeywordIndexTest`)
+plus the `$$events-by-tag` / `$$events-by-person` fan-outs (`MultiValueIndexTest`).
+
+### Multiple `Ops.EXPLODE` fan-outs in one topology → isolate with `anchor`/`hook`
+Verified 2026-07-05 against `redplanetlabs.com/docs/~/intermediate-dataflow.html`: operations
+after an EXPLODE run **once per emitted element** ("the subsequent code is executed for each
+element emitted"). So chaining two-or-more list fan-outs on the same branch NESTS them —
+`N` tags × `M` persons × `K` tokens. For inverted indexes whose values are **Sets** this does
+NOT corrupt membership (Set dedup absorbs the redundant writes), but it is severe **write
+amplification**: `N·M·K` writes instead of `N+M+K`. Contain each fan-out as an independent
+branch off the same input node with `.anchor("name")` … `.hook("name")` (anchor labels a node;
+hook reattaches the following ops to it; branches run in unspecified order, no cartesian
+product). Verified call shape in `FamilySchemaModule`'s `family-events-stream`:
+
+```java
+.anchor("fanoutRoot")
+.select("*record", Path.key("tags")).out("*tags")
+.macro(Block.each(Ops.EXPLODE, "*tags").out("*tag"))
+.localTransform("$$events-by-tag",
+    Path.key("*familyId").key("*tag").nullToSet().voidSetElem().termVal("*eventId"))
+.hook("fanoutRoot")
+// … personId branch, then keyword branch, each hooking back to "fanoutRoot" …
+```
+
+`.anchor`/`.hook` confirmed present on the stream-topology chain (compiles + full suite green).
+Exercised by `MultiValueIndexTest` — fan-out completeness, branch isolation (no field bleed
+between the tag/person indexes), and all three branches firing for one record. Note: a
+single-element-per-list test (like the existing `IndexPStateTest`) cannot catch a missed
+containment because Set membership is identical either way — you need a multi-element record.
+
+### Null map values round-trip through Rama serialization (1.5.0)
+Verified 2026-07-05 by `MultiValueIndexTest.classifierOutputFieldsRoundTripAsNullOrEmpty`: a
+record appended with `map.put("confidence", (Double) null)` (and null `reason`/`documentType`)
+drains into `$$family-data` and reads back with `containsKey("confidence") == true` and
+`get("confidence") == null`. So a plumbed-but-unpopulated field can be stored as an explicit
+`null` value — no sentinel or key-omission needed. This is why the schema refactor defaults
+`confidence`/`reason` to `null` rather than a `0.0`/"" sentinel.
 
 ### `agentNode.getAgentClient(String)` — same-module agent-to-agent invocation, verified against the 0.8.0 jar
 Verified 2026-07-03 against `/Volumes/CORSAIR/.m2/repository/com/rpl/agent-o-rama/0.8.0/agent-o-rama-0.8.0.jar`

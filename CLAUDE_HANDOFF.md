@@ -15,7 +15,10 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **111/111 tests passing** (non-LLM suite, no GEMINI_API_KEY required)
+- **123/123 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+  2026-07-05 schema refactor (Session 2: `eventType`→`tags`, `childName`/`childId`→`personId`,
+  + plumbed classifier fields). +12 vs the prior 111 = the new `MultiValueIndexTest` (8) plus
+  reworked index-test assertions.
 - LLM-tagged suite: `EmailIngestionTest`/`FamilyAssistantTest` (5 tests) green as of the
   2026-07-03 `GmailMessage`/`String` call-site fix. `QueryAgentTest` (4 tests) is flaky —
   a 3-consecutive-run audit the same day showed 3/4, 2/4, 3/4, never 4/4 — root cause is
@@ -69,13 +72,13 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | PState | Key path | Value | Notes |
 |---|---|---|---|
 | `$$family-data` | `familyId -> "events" -> eventId` | `Map<String, Object>` record | Primary store |
-| `$$events-by-child` | `familyId -> childName` | `Set<eventId>` | Null/blank childName not indexed |
-| `$$events-by-category` | `familyId -> eventType` | `Set<eventId>` | Null/blank eventType not indexed |
+| `$$events-by-person` | `familyId -> personId` | `Set<eventId>` | `personId` is a `List<String>`; fanned out one entry per element via `Ops.EXPLODE` (empty list → no entry). Renamed from `$$events-by-child` 2026-07-05. |
+| `$$events-by-tag` | `familyId -> tag` | `Set<eventId>` | `tags` is a `List<String>`; fanned out one entry per element via `Ops.EXPLODE` (empty list → no entry). Renamed from `$$events-by-category` 2026-07-05. |
 | `$$events-by-account` | `familyId -> accountLabel` | `Set<eventId>` | Null/blank accountLabel not indexed |
 | `$$events-by-date` | `familyId -> epochMs` (subindexed) | `Set<eventId>` | effectiveTime = startTime ?? deadline; null excluded |
 | `$$events-by-silo` | `familyId -> silo` | `Set<eventId>` | VAULT/OFFICE/STUDIO/UNKNOWN; UNKNOWN is indexed (correction-loop) |
 | `$$events-by-intent` | `familyId -> intent` | `Set<eventId>` | ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN; UNKNOWN is indexed |
-| `$$events-by-keyword` | `familyId -> keyword` | `Set<eventId>` | Tokenized `title`+`description`+`emailSubject` (lowercase, `[^a-z0-9]+` split, 3-char min, ~40-word stopword list). Populated via `Ops.EXPLODE` fan-out — see `RAMA_VERIFIED_LEARNINGS.md`. Read by `QueryModule`'s `search-agent` as the primary/HARD search dimension. |
+| `$$events-by-keyword` | `familyId -> keyword` | `Set<eventId>` | Tokenized `title`+`description`+`emailSubject` (lowercase, `[^a-z0-9]+` split, 3-char min, ~40-word stopword list). Populated via `Ops.EXPLODE` fan-out. Since 2026-07-05 it shares the topology with the `tags` and `personId` fan-outs; all three are isolated as independent branches via `.anchor("fanoutRoot")`/`.hook(...)` to avoid cartesian write amplification — see `RAMA_VERIFIED_LEARNINGS.md`. Read by `QueryModule`'s `search-agent` as the primary/HARD search dimension. |
 | `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
 | `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
 
@@ -107,31 +110,37 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 | `familyId` | String | partition key |
 | `title` | String | email subject / LLM-extracted |
 | `description` | String | email body |
-| `eventType` | String | SCHOOL_EVENT, DEADLINE, PERMISSION_SLIP, TASK, UNKNOWN |
-| `childName` | String | LLM-extracted or mapped from JSON |
-| `childId` | String | childName.toLowerCase() |
+| `tags` | `List<String>` | Classifier category values (SCHOOL_EVENT, DEADLINE, PERMISSION_SLIP, TASK, UNKNOWN). Replaced single-value `eventType` 2026-07-05; classifier still emits one category, so 0..1 element for now — the List shape lets a later parser attach several. |
+| `personId` | `List<String>` | Family members referenced by the email. Replaced `childName`/`childId` 2026-07-05. Currently holds the extracted child **name** (0..1 element) until an id-resolver session; sender-tagging not yet wired. |
 | `startTime` | Long | epoch ms |
 | `deadline` | Long | epoch ms |
+| `documentType` | String | **Schema-only (2026-07-05): plumbed, not yet populated — `null` this session.** |
+| `relatedEventIds` | `List<String>` | **Schema-only (2026-07-05): plumbed, not yet populated — empty list this session.** |
+| `confidence` | Double | **Schema-only (2026-07-05): classifier score, plumbed, not yet populated — `null` this session. Always `Double`, never `Integer`.** |
+| `reason` | String | **Schema-only (2026-07-05): classifier rationale, plumbed, not yet populated — `null` this session.** |
 | `urgency` | String | critical, high, medium, low |
 | `status` | String | pending, completed |
 | `sourceType` | String | email, test |
 | `accountLabel` | String | Gmail account label |
 | `created` / `updated` | Long | epoch ms |
 
+> **Classifier-output fields** (`confidence`, `reason`, `documentType`, `relatedEventIds`) are plumbed into the record + serialization but the parsing agent does NOT populate them yet — `null`/empty is the correct passing state this session. Wiring the classifier to fill them is a later session. Verified that `null` map values round-trip through Rama serialization (`containsKey` true, `get` null), so no sentinel is needed — see `RAMA_VERIFIED_LEARNINGS.md`.
+
 ---
 
-## Test Suite (111 tests, all non-LLM)
+## Test Suite (123 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
+| `MultiValueIndexTest` | 8 | Multi-element `tags`/`personId` fan-out completeness, tag/person branch isolation (no field bleed), keyword-branch coexistence under `anchor`/`hook`, and classifier-field `null` round-trip. Added 2026-07-05. |
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
 | `CohenFamilyDatasetTest` | 19 | Real 21-day dataset (13 email records), all indexes |
-| `IndexPStateTest` | 13 | Child/category index correctness |
+| `IndexPStateTest` | 13 | Person/tag index correctness (single-element lists) |
 | `KeywordIndexTest` | 10 | `$$events-by-keyword` population — multi-field tokenization, case folding, stopwords, min-length, dedup, isolation |
 | `WeaknessLeverageMapTest` | 9 | `$$leverage-map`/`$$weakness-map` population, digest reordering, weakness annotation, graceful no-op |
 | `AccountLabelTest` | 8 | `$$events-by-account` index + DigestModule account filtering |
 | `SiloIntentIndexTest` | 8 | `$$events-by-silo`/`$$events-by-intent` population and isolation |
-| `QueryIndexTest` | 7 | `$$events-by-child` and `$$events-by-category` range assertions |
+| `QueryIndexTest` | 7 | `$$events-by-person` and `$$events-by-tag` range assertions |
 | `SearchAgentTest` | 6 | `search-agent`'s two-tier hard/soft intersection — zero-dimension full scan, wrong-SOFT+right-HARD rescue, wrong-HARD+right-SOFT control (stays empty), HARD∩HARD genuine filtering, SOFT narrowing in the non-fallback path, all-SOFT-no-HARD-anchor stays empty |
 | `DateIndexTest` | 6 | `$$events-by-date` range queries, effectiveTime logic |
 | `EmailIngestionTest` | 2 | Batch fan-out, blank/null filtering |
@@ -264,6 +273,17 @@ explicitly forbidden). This is a wider-blast-radius version of the already-known
 email = one event" parser-granularity issue — it affects any question or feature whose
 correctness depends on which side of a day boundary an event's `startTime` lands,
 including future digest-window features, not just `QueryModule`.
+
+## Recently Completed (2026-07-05) — Schema refactor Session 2
+
+`eventType`→`tags` (`List<String>`), `childName`/`childId`→`personId` (`List<String>`),
+indexes renamed to `$$events-by-tag`/`$$events-by-person` (EXPLODE fan-out, isolated with
+`anchor`/`hook`), and four classifier-output fields (`documentType`, `relatedEventIds`,
+`confidence`, `reason`) plumbed schema-only. Clean swap — old fields/indexes removed, no
+parallel-emit. 123/123 non-LLM tests green. **Now unblocked (deliberately deferred out of
+this session):** (1) wire the classifier to populate `confidence`/`reason`; (2) `personId`
+id-resolver + sender-tagging (currently holds child name only); (3) the multi-event
+extraction below is now easier because `tags` already accepts multiple values per event.
 
 ## Next Task
 

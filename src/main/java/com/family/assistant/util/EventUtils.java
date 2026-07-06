@@ -72,4 +72,20 @@ public final class EventUtils {
         String s = val.toString().trim();
         return s.isEmpty() ? fallback : s;
     }
+
+    /**
+     * Renders a record's multi-valued tags field for display, joined with ", ".
+     * Returns {@code fallback} when the value is absent, not a list, or empty.
+     */
+    public static String tagsDisplay(Object rawTags, String fallback) {
+        if (!(rawTags instanceof List)) return fallback;
+        List<?> tags = (List<?>) rawTags;
+        if (tags.isEmpty()) return fallback;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < tags.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(str(tags.get(i), fallback));
+        }
+        return sb.toString();
+    }
 }

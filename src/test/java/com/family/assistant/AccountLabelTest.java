@@ -12,7 +12,9 @@ import com.rpl.rama.test.LaunchConfig;
 import org.junit.jupiter.api.*;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -94,11 +96,12 @@ public class AccountLabelTest {
         event.put("id",           id);
         event.put("familyId",     FAMILY_ID);
         event.put("title",        title);
-        event.put("eventType",    "SCHOOL_EVENT");
+        List<String> tags = new ArrayList<>();
+        tags.add("SCHOOL_EVENT");
+        event.put("tags",         tags);
         event.put("startTime",    startTime);
         event.put("deadline",     null);
-        event.put("childName",    null);
-        event.put("childId",      null);
+        event.put("personId",     new ArrayList<String>());
         event.put("status",       "pending");
         event.put("description",  "Test event " + id);
         event.put("sourceType",   "test");

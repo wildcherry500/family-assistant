@@ -225,7 +225,7 @@ public class DigestModule extends AgentModule implements java.io.Serializable {
 
                     for (Map<String, Object> event : events) {
                         String title      = str(event.get("title"), "Untitled");
-                        String eventType  = str(event.get("eventType"), "event");
+                        String eventType  = tagsDisplay(event.get("tags"), "event");
                         String status     = str(event.get("status"), "pending");
                         String assignedTo = str(event.get("assignedTo"), "unassigned");
                         Long startTime    = toLong(event.get("startTime"));

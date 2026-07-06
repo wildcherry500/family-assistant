@@ -23,8 +23,10 @@ import java.util.Map;
  *   $$raw-emails         — familyId -> gmailMessageId -> { ...complete raw email... }
  *                          (write-ahead log; the *raw-emails depot is the durable
  *                           replay source, this PState is the inspectable view)
- *   $$events-by-child    — familyId -> childName  -> Set<eventId>
- *   $$events-by-category — familyId -> eventType  -> Set<eventId>
+ *   $$events-by-person   — familyId -> personId (family member; a record carries a
+ *                          List<String>, so this index is fanned out one entry per element) -> Set<eventId>
+ *   $$events-by-tag      — familyId -> tag (a record carries a List<String>, so this index
+ *                          is fanned out one entry per element) -> Set<eventId>
  *   $$events-by-account  — familyId -> accountLabel -> Set<eventId>
  *   $$events-by-date     — familyId -> epochMs (sorted) -> Set<eventId>
  *   $$events-by-silo     — familyId -> silo (VAULT/OFFICE/STUDIO/UNKNOWN) -> Set<eventId>
@@ -94,14 +96,16 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.mapSchema(String.class, Object.class))));
 
-        // Inverted index: familyId -> childName -> Set<eventId>
-        stream.pstate("$$events-by-child",
+        // Inverted index: familyId -> personId -> Set<eventId>
+        // (record's personId is a List<String>; the topology fans out one write per element)
+        stream.pstate("$$events-by-person",
             PState.mapSchema(String.class,
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
-        // Inverted index: familyId -> eventType -> Set<eventId>
-        stream.pstate("$$events-by-category",
+        // Inverted index: familyId -> tag -> Set<eventId>
+        // (record's tags is a List<String>; the topology fans out one write per element)
+        stream.pstate("$$events-by-tag",
             PState.mapSchema(String.class,
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
@@ -156,17 +160,6 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           // Write primary store
           .localTransform("$$family-data",
               Path.key("*familyId").key("events").key("*eventId").termVal("*record"))
-          // Extract child name and event type
-          .select("*record", Path.key("childName")).out("*childName")
-          .select("*record", Path.key("eventType")).out("*eventType")
-          // Conditionally write child index (only when childName is non-null and non-blank)
-          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*childName"),
-              Block.localTransform("$$events-by-child",
-                  Path.key("*familyId").key("*childName").nullToSet().voidSetElem().termVal("*eventId")))
-          // Conditionally write category index (only when eventType is non-null and non-blank)
-          .ifTrue(new Expr(FamilySchemaModule::isPresent, "*eventType"),
-              Block.localTransform("$$events-by-category",
-                  Path.key("*familyId").key("*eventType").nullToSet().voidSetElem().termVal("*eventId")))
           // Extract accountLabel and conditionally write account index
           .select("*record", Path.key("accountLabel")).out("*accountLabel")
           .ifTrue(new Expr(FamilySchemaModule::isPresent, "*accountLabel"),
@@ -190,6 +183,26 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
               Block.localTransform("$$events-by-date",
                   Path.key("*familyId", "*epochMs")
                       .nullToSet().voidSetElem().termVal("*eventId")))
+          // --- Multi-valued inverted indexes: tags, personId, keywords ---
+          // Each is List-valued on the record, so each write fans out one entry per
+          // element via Ops.EXPLODE. Operations after an EXPLODE run once per exploded
+          // element, so three sequential explodes on the same branch would
+          // cartesian-multiply. anchor/hook isolates each fan-out as an independent
+          // branch off the same input node, keeping index membership correct.
+          // (verified: redplanetlabs.com/docs ~ intermediate-dataflow, anchor/hook.)
+          .anchor("fanoutRoot")
+          // Inverted index: familyId -> tag -> Set<eventId>
+          .select("*record", Path.key("tags")).out("*tags")
+          .macro(Block.each(Ops.EXPLODE, "*tags").out("*tag"))
+          .localTransform("$$events-by-tag",
+              Path.key("*familyId").key("*tag").nullToSet().voidSetElem().termVal("*eventId"))
+          .hook("fanoutRoot")
+          // Inverted index: familyId -> personId -> Set<eventId>
+          .select("*record", Path.key("personId")).out("*persons")
+          .macro(Block.each(Ops.EXPLODE, "*persons").out("*person"))
+          .localTransform("$$events-by-person",
+              Path.key("*familyId").key("*person").nullToSet().voidSetElem().termVal("*eventId"))
+          .hook("fanoutRoot")
           // Tokenize title+description+emailSubject and fan out one write per token
           .macro(Block.each(EventUtils::tokenizeEvent, "*record").out("*tokens"))
           .macro(Block.each(Ops.EXPLODE, "*tokens").out("*token"))

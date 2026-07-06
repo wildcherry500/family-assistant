@@ -357,10 +357,13 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                         "FamilySchemaModule", "$$events-by-keyword");
                     PStateStore psDate = agentNode.getMirrorStore(
                         "FamilySchemaModule", "$$events-by-date");
-                    PStateStore psChild = agentNode.getMirrorStore(
-                        "FamilySchemaModule", "$$events-by-child");
-                    PStateStore psCategory = agentNode.getMirrorStore(
-                        "FamilySchemaModule", "$$events-by-category");
+                    // childName/categoryFilter are legacy query-param names; they now resolve
+                    // against the renamed multi-valued person/tag indexes. A single-value lookup
+                    // still works because each list element is an index key.
+                    PStateStore psPerson = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$events-by-person");
+                    PStateStore psTag = agentNode.getMirrorStore(
+                        "FamilySchemaModule", "$$events-by-tag");
                     PStateStore psSilo = agentNode.getMirrorStore(
                         "FamilySchemaModule", "$$events-by-silo");
                     PStateStore psIntent = agentNode.getMirrorStore(
@@ -407,7 +410,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                     if (params.childName != null) {
                         @SuppressWarnings("unchecked")
                         Set<String> ids = (Set<String>)
-                            psChild.selectOne(Path.key(params.familyId).key(params.childName));
+                            psPerson.selectOne(Path.key(params.familyId).key(params.childName));
                         byDimension.put("childName",
                             ids != null ? new HashSet<>(ids) : new HashSet<>());
                     }
@@ -416,7 +419,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
                     if (params.categoryFilter != null) {
                         @SuppressWarnings("unchecked")
                         Set<String> ids = (Set<String>)
-                            psCategory.selectOne(Path.key(params.familyId).key(params.categoryFilter));
+                            psTag.selectOne(Path.key(params.familyId).key(params.categoryFilter));
                         byDimension.put("categoryFilter",
                             ids != null ? new HashSet<>(ids) : new HashSet<>());
                     }
@@ -628,11 +631,14 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
         }
     }
 
-    private boolean childNameMatches(Map<String, Object> event, String filter) {
+    private boolean personMatches(Map<String, Object> event, String filter) {
         String lower = filter.toLowerCase();
-        String childId   = str(event.get("childId"),   "").toLowerCase();
-        String childName = str(event.get("childName"), "").toLowerCase();
-        return childId.contains(lower) || childName.contains(lower);
+        Object raw = event.get("personId");
+        if (!(raw instanceof List)) return false;
+        for (Object p : (List<?>) raw) {
+            if (p != null && p.toString().toLowerCase().contains(lower)) return true;
+        }
+        return false;
     }
 
     private String formatEventsForPrompt(List<Map<String, Object>> events,
@@ -643,7 +649,7 @@ public class QueryModule extends AgentModule implements java.io.Serializable {
         StringBuilder sb = new StringBuilder();
         for (Map<String, Object> e : events) {
             sb.append("- ").append(str(e.get("title"), "Untitled")).append("\n");
-            sb.append("  Type: ").append(str(e.get("eventType"), "unknown")).append("\n");
+            sb.append("  Type: ").append(tagsDisplay(e.get("tags"), "unknown")).append("\n");
             Long st = toLong(e.get("startTime"));
             Long dl = toLong(e.get("deadline"));
             if (st != null) sb.append("  Date: ")

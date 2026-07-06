@@ -16,8 +16,8 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * QueryIndexTest
  *
- * Verifies that FamilySchemaModule correctly populates $$events-by-child,
- * $$events-by-category, and $$family-data from *family-events depot records.
+ * Verifies that FamilySchemaModule correctly populates $$events-by-person,
+ * $$events-by-tag, and $$family-data from *family-events depot records.
  *
  * No GEMINI_API_KEY required — all tests use direct PState reads.
  */
@@ -50,8 +50,8 @@ public class QueryIndexTest {
 
         familyEventsDepot = ipc.clusterDepot(schemaModule.getModuleName(), "*family-events");
         familyData        = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
-        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-child");
-        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-category");
+        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
+        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
 
         // Seed 5 test events directly into the depot (no LLM involved)
         // evt-1: Billy, SCHOOL_EVENT, MAR_20
@@ -90,11 +90,14 @@ public class QueryIndexTest {
         event.put("id", id);
         event.put("familyId", familyId);
         event.put("title", title);
-        event.put("eventType", eventType);
+        List<String> tags = new ArrayList<>();
+        if (eventType != null) tags.add(eventType);
+        event.put("tags", tags);
         event.put("startTime", startTime);
         event.put("deadline", deadline);
-        event.put("childName", childName);
-        event.put("childId", childName != null ? childName.toLowerCase() : null);
+        List<String> personId = new ArrayList<>();
+        if (childName != null) personId.add(childName);
+        event.put("personId", personId);
         event.put("status", "pending");
         event.put("description", "Test event " + id);
         event.put("sourceType", "test");
@@ -104,7 +107,7 @@ public class QueryIndexTest {
     }
 
     // =======================================================================
-    // $$events-by-child index assertions
+    // $$events-by-person index assertions
     // =======================================================================
 
     @Test
@@ -113,7 +116,7 @@ public class QueryIndexTest {
         Set<String> billyEvents = (Set<String>)
                 eventsByChild.selectOne(Path.key(FAMILY_ID).key("Billy"));
 
-        assertNotNull(billyEvents, "Billy's event set should exist in $$events-by-child");
+        assertNotNull(billyEvents, "Billy's event set should exist in $$events-by-person");
         assertTrue(billyEvents.contains("evt-1"),
                 "Billy's set should contain evt-1 (Zoo Field Trip)");
         assertTrue(billyEvents.contains("evt-2"),
@@ -128,7 +131,7 @@ public class QueryIndexTest {
         Set<String> emmaEvents = (Set<String>)
                 eventsByChild.selectOne(Path.key(FAMILY_ID).key("Emma"));
 
-        assertNotNull(emmaEvents, "Emma's event set should exist in $$events-by-child");
+        assertNotNull(emmaEvents, "Emma's event set should exist in $$events-by-person");
         assertTrue(emmaEvents.contains("evt-3"),
                 "Emma's set should contain evt-3 (Science Fair)");
         assertTrue(emmaEvents.contains("evt-5"),
@@ -145,13 +148,13 @@ public class QueryIndexTest {
         Object nullEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key(null));
         if (nullEntry instanceof Set) {
             assertFalse(((Set<?>) nullEntry).contains("evt-4"),
-                    "evt-4 (null childName) must not appear in $$events-by-child");
+                    "evt-4 (null childName) must not appear in $$events-by-person");
         }
         // If nullEntry is null, the null key was never written — that's correct
     }
 
     // =======================================================================
-    // $$events-by-category index assertions
+    // $$events-by-tag index assertions
     // =======================================================================
 
     @Test
@@ -160,7 +163,7 @@ public class QueryIndexTest {
         Set<String> schoolEvents = (Set<String>)
                 eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
 
-        assertNotNull(schoolEvents, "SCHOOL_EVENT set should exist in $$events-by-category");
+        assertNotNull(schoolEvents, "SCHOOL_EVENT set should exist in $$events-by-tag");
         assertTrue(schoolEvents.contains("evt-1"),
                 "SCHOOL_EVENT set should contain evt-1 (Billy Zoo Field Trip)");
         assertTrue(schoolEvents.contains("evt-3"),
@@ -175,7 +178,7 @@ public class QueryIndexTest {
         Set<String> permSlipEvents = (Set<String>)
                 eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
 
-        assertNotNull(permSlipEvents, "PERMISSION_SLIP set should exist in $$events-by-category");
+        assertNotNull(permSlipEvents, "PERMISSION_SLIP set should exist in $$events-by-tag");
         assertTrue(permSlipEvents.contains("evt-2"),
                 "PERMISSION_SLIP set should contain evt-2 (Billy Permission Slip)");
         assertTrue(permSlipEvents.contains("evt-5"),

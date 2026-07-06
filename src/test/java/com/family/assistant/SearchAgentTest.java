@@ -113,13 +113,14 @@ public class SearchAgentTest {
         event.put("title",        title);
         event.put("description",  description);
         event.put("emailSubject", null);
-        event.put("eventType",    eventType);
+        List<String> tags = new ArrayList<>();
+        if (eventType != null) tags.add(eventType);
+        event.put("tags",         tags);
         event.put("silo",         silo);
         event.put("intent",       intent);
         event.put("startTime",    startTime);
         event.put("deadline",     null);
-        event.put("childName",    null);
-        event.put("childId",      null);
+        event.put("personId",     new ArrayList<String>());
         event.put("status",       "pending");
         event.put("sourceType",   "test");
         event.put("accountLabel", null);

@@ -8,7 +8,9 @@ import com.rpl.rama.test.InProcessCluster;
 import com.rpl.rama.test.LaunchConfig;
 import org.junit.jupiter.api.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -81,13 +83,14 @@ public class SiloIntentIndexTest {
         event.put("id",         id);
         event.put("familyId",   FAMILY_ID);
         event.put("title",      "Test event " + id);
-        event.put("eventType",  "TASK");
+        List<String> tags = new ArrayList<>();
+        tags.add("TASK");
+        event.put("tags",       tags);
         event.put("silo",       silo);
         event.put("intent",     intent);
         event.put("startTime",  null);
         event.put("deadline",   null);
-        event.put("childName",  null);
-        event.put("childId",    null);
+        event.put("personId",   new ArrayList<String>());
         event.put("status",     "pending");
         event.put("description", "Test event " + id);
         event.put("sourceType", "test");
@@ -197,7 +200,7 @@ public class SiloIntentIndexTest {
             "silo field should be persisted on the event record");
         assertEquals("DECISION_NEEDED", event.get("intent"),
             "intent field should be persisted on the event record");
-        assertEquals("TASK", event.get("eventType"),
+        assertTrue(((List<?>) event.get("tags")).contains("TASK"),
             "eventType must remain untouched by the silo/intent addition");
     }
 }
