@@ -37,8 +37,8 @@ public class QueryIndexTest {
     private InProcessCluster ipc;
     private Depot familyEventsDepot;
     private PState familyData;
-    private PState eventsByChild;
-    private PState eventsByCategory;
+    private PState eventsByPerson;
+    private PState eventsByTag;
 
     @BeforeAll
     void setup() throws Exception {
@@ -50,8 +50,8 @@ public class QueryIndexTest {
 
         familyEventsDepot = ipc.clusterDepot(schemaModule.getModuleName(), "*family-events");
         familyData        = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
-        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
-        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
+        eventsByPerson     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
+        eventsByTag  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
 
         // Seed 5 test events directly into the depot (no LLM involved)
         // evt-1: Billy, SCHOOL_EVENT, MAR_20
@@ -114,7 +114,7 @@ public class QueryIndexTest {
     @Order(1)
     void testChildIndexPopulated_Billy() {
         Set<String> billyEvents = (Set<String>)
-                eventsByChild.selectOne(Path.key(FAMILY_ID).key("Billy"));
+                eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Billy"));
 
         assertNotNull(billyEvents, "Billy's event set should exist in $$events-by-person");
         assertTrue(billyEvents.contains("evt-1"),
@@ -129,7 +129,7 @@ public class QueryIndexTest {
     @Order(2)
     void testChildIndexPopulated_Emma() {
         Set<String> emmaEvents = (Set<String>)
-                eventsByChild.selectOne(Path.key(FAMILY_ID).key("Emma"));
+                eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Emma"));
 
         assertNotNull(emmaEvents, "Emma's event set should exist in $$events-by-person");
         assertTrue(emmaEvents.contains("evt-3"),
@@ -145,7 +145,7 @@ public class QueryIndexTest {
     void testChildIndex_NullChildNotIndexed() {
         // evt-4 has childName=null — should not appear under any child key
         // We verify it is not present under the null key
-        Object nullEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key(null));
+        Object nullEntry = eventsByPerson.selectOne(Path.key(FAMILY_ID).key(null));
         if (nullEntry instanceof Set) {
             assertFalse(((Set<?>) nullEntry).contains("evt-4"),
                     "evt-4 (null childName) must not appear in $$events-by-person");
@@ -161,7 +161,7 @@ public class QueryIndexTest {
     @Order(4)
     void testCategoryIndex_SchoolEvent() {
         Set<String> schoolEvents = (Set<String>)
-                eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+                eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
 
         assertNotNull(schoolEvents, "SCHOOL_EVENT set should exist in $$events-by-tag");
         assertTrue(schoolEvents.contains("evt-1"),
@@ -176,7 +176,7 @@ public class QueryIndexTest {
     @Order(5)
     void testCategoryIndex_PermissionSlip() {
         Set<String> permSlipEvents = (Set<String>)
-                eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
+                eventsByTag.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
 
         assertNotNull(permSlipEvents, "PERMISSION_SLIP set should exist in $$events-by-tag");
         assertTrue(permSlipEvents.contains("evt-2"),

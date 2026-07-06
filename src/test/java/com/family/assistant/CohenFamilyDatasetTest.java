@@ -40,8 +40,8 @@ public class CohenFamilyDatasetTest {
     private InProcessCluster ipc;
     private Depot familyEventsDepot;
     private PState familyData;
-    private PState eventsByChild;
-    private PState eventsByCategory;
+    private PState eventsByPerson;
+    private PState eventsByTag;
 
     private final List<String> seededEventIds = new ArrayList<>();
     private int expectedEmailCount = 0;
@@ -55,8 +55,8 @@ public class CohenFamilyDatasetTest {
 
         familyEventsDepot = ipc.clusterDepot(schemaModule.getModuleName(), "*family-events");
         familyData        = ipc.clusterPState(schemaModule.getModuleName(), "$$family-data");
-        eventsByChild     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
-        eventsByCategory  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
+        eventsByPerson     = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-person");
+        eventsByTag  = ipc.clusterPState(schemaModule.getModuleName(), "$$events-by-tag");
 
         seedFromDataset();
         Thread.sleep(2500);
@@ -224,7 +224,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByChildContainsMaya() {
         Set<String> mayaEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Maya"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Maya"));
 
         assertNotNull(mayaEvents, "$$events-by-person should have a 'Maya' entry");
         assertFalse(mayaEvents.isEmpty(), "Maya's event set should be non-empty");
@@ -240,7 +240,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByChildContainsJosh() {
         Set<String> joshEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Josh"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Josh"));
 
         assertNotNull(joshEvents, "$$events-by-person should have a 'Josh' entry");
         assertFalse(joshEvents.isEmpty(), "Josh's event set should be non-empty");
@@ -255,8 +255,8 @@ public class CohenFamilyDatasetTest {
     @Test @Order(12)
     void testBothAndNoneNotIndexedAsChildNames() {
         // "Both" and "None" → childName=null → must not appear as keys in the index
-        Object bothEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key("Both"));
-        Object noneEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key("None"));
+        Object bothEntry = eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Both"));
+        Object noneEntry = eventsByPerson.selectOne(Path.key(FAMILY_ID).key("None"));
 
         assertNull(bothEntry, "'Both' must not be a key in $$events-by-person");
         assertNull(noneEntry, "'None' must not be a key in $$events-by-person");
@@ -267,9 +267,9 @@ public class CohenFamilyDatasetTest {
     void testMayaAndJoshEventCountsMatchDataset() {
         // Dataset statistics: Maya=8 (all channels). Email-only: 5 Maya, 4 Josh.
         Set<String> mayaEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Maya"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Maya"));
         Set<String> joshEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Josh"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Josh"));
 
         assertEquals(5, mayaEvents.size(), "5 email records have child=Maya");
         assertEquals(4, joshEvents.size(), "4 email records have child=Josh");
@@ -283,7 +283,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByCategoryContainsSchoolEvent() {
         Set<String> schoolEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
 
         assertNotNull(schoolEvents, "SCHOOL_EVENT should exist in $$events-by-tag");
         assertFalse(schoolEvents.isEmpty(), "SCHOOL_EVENT set should be non-empty");
@@ -297,7 +297,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByCategoryContainsPermissionSlip() {
         Set<String> permSlipEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
 
         assertNotNull(permSlipEvents, "PERMISSION_SLIP should exist in $$events-by-tag");
         assertFalse(permSlipEvents.isEmpty(), "PERMISSION_SLIP set should be non-empty");
@@ -314,7 +314,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByCategoryContainsTask() {
         Set<String> taskEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("TASK"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("TASK"));
 
         assertNotNull(taskEvents, "TASK should exist in $$events-by-tag");
         assertTrue(taskEvents.contains("email_0009"),
@@ -328,7 +328,7 @@ public class CohenFamilyDatasetTest {
     @SuppressWarnings("unchecked")
     void testEventsByCategoryContainsUnknown() {
         Set<String> unknownEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("UNKNOWN"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("UNKNOWN"));
 
         assertNotNull(unknownEvents, "UNKNOWN should exist in $$events-by-tag (religious emails)");
         assertTrue(unknownEvents.contains("email_0010"),
@@ -340,10 +340,10 @@ public class CohenFamilyDatasetTest {
     @Test @Order(24)
     @SuppressWarnings("unchecked")
     void testCategoryCountsSumToTotal() {
-        Set<String> school   = (Set<String>) eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
-        Set<String> permSlip = (Set<String>) eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
-        Set<String> task     = (Set<String>) eventsByCategory.selectOne(Path.key(FAMILY_ID).key("TASK"));
-        Set<String> unknown  = (Set<String>) eventsByCategory.selectOne(Path.key(FAMILY_ID).key("UNKNOWN"));
+        Set<String> school   = (Set<String>) eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+        Set<String> permSlip = (Set<String>) eventsByTag.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
+        Set<String> task     = (Set<String>) eventsByTag.selectOne(Path.key(FAMILY_ID).key("TASK"));
+        Set<String> unknown  = (Set<String>) eventsByTag.selectOne(Path.key(FAMILY_ID).key("UNKNOWN"));
 
         int total = school.size() + permSlip.size() + task.size() + unknown.size();
         assertEquals(expectedEmailCount, total,

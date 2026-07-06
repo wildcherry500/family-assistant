@@ -30,8 +30,8 @@ public class IndexPStateTest {
 
     private InProcessCluster ipc;
     private Depot familyEventsDepot;
-    private PState eventsByChild;
-    private PState eventsByCategory;
+    private PState eventsByPerson;
+    private PState eventsByTag;
 
     @BeforeAll
     void setup() throws Exception {
@@ -41,8 +41,8 @@ public class IndexPStateTest {
         ipc.launchModule(schemaModule, new LaunchConfig(1, 1));
 
         familyEventsDepot = ipc.clusterDepot(MODULE_NAME, "*family-events");
-        eventsByChild     = ipc.clusterPState(MODULE_NAME, "$$events-by-person");
-        eventsByCategory  = ipc.clusterPState(MODULE_NAME, "$$events-by-tag");
+        eventsByPerson     = ipc.clusterPState(MODULE_NAME, "$$events-by-person");
+        eventsByTag  = ipc.clusterPState(MODULE_NAME, "$$events-by-tag");
 
         // evt-A: Billy, SCHOOL_EVENT
         appendEvent("evt-A", FAMILY_ID, "Billy", "SCHOOL_EVENT");
@@ -86,7 +86,7 @@ public class IndexPStateTest {
     @Order(1)
     void testChildIndexBillyContainsEvtA() {
         Set<String> billyEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Billy"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Billy"));
         assertNotNull(billyEvents, "Billy's event set should exist");
         assertTrue(billyEvents.contains("evt-A"),
             "Billy's set should contain evt-A");
@@ -96,7 +96,7 @@ public class IndexPStateTest {
     @Order(2)
     void testChildIndexBillyContainsEvtB() {
         Set<String> billyEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Billy"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Billy"));
         assertNotNull(billyEvents, "Billy's event set should exist");
         assertTrue(billyEvents.contains("evt-B"),
             "Billy's set should contain evt-B");
@@ -106,7 +106,7 @@ public class IndexPStateTest {
     @Order(3)
     void testChildIndexEmmaContainsEvtC() {
         Set<String> emmaEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Emma"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Emma"));
         assertNotNull(emmaEvents, "Emma's event set should exist");
         assertTrue(emmaEvents.contains("evt-C"),
             "Emma's set should contain evt-C");
@@ -117,7 +117,7 @@ public class IndexPStateTest {
     void testNullChildNameNotIndexed() {
         // evt-D has null childName — should not create any child entry for null
         // The null key should not exist in the child index for this family
-        Object nullEntry = eventsByChild.selectOne(Path.key(FAMILY_ID).key(null));
+        Object nullEntry = eventsByPerson.selectOne(Path.key(FAMILY_ID).key(null));
         if (nullEntry instanceof Set) {
             Set<?> s = (Set<?>) nullEntry;
             assertFalse(s.contains("evt-D"),
@@ -130,7 +130,7 @@ public class IndexPStateTest {
     @Order(5)
     void testBillyHasExactlyTwoEvents() {
         Set<String> billyEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Billy"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Billy"));
         assertNotNull(billyEvents);
         assertEquals(2, billyEvents.size(),
             "Billy should have exactly 2 events (evt-A, evt-B)");
@@ -140,7 +140,7 @@ public class IndexPStateTest {
     @Order(6)
     void testEmmaHasExactlyOneEvent() {
         Set<String> emmaEvents = (Set<String>)
-            eventsByChild.selectOne(Path.key(FAMILY_ID).key("Emma"));
+            eventsByPerson.selectOne(Path.key(FAMILY_ID).key("Emma"));
         assertNotNull(emmaEvents);
         assertEquals(1, emmaEvents.size(),
             "Emma should have exactly 1 event (evt-C)");
@@ -154,7 +154,7 @@ public class IndexPStateTest {
     @Order(10)
     void testCategoryIndexSchoolEventContainsEvtA() {
         Set<String> schoolEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
         assertNotNull(schoolEvents, "SCHOOL_EVENT set should exist");
         assertTrue(schoolEvents.contains("evt-A"),
             "SCHOOL_EVENT set should contain evt-A");
@@ -164,7 +164,7 @@ public class IndexPStateTest {
     @Order(11)
     void testCategoryIndexSchoolEventContainsEvtC() {
         Set<String> schoolEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
         assertNotNull(schoolEvents, "SCHOOL_EVENT set should exist");
         assertTrue(schoolEvents.contains("evt-C"),
             "SCHOOL_EVENT set should contain evt-C");
@@ -174,7 +174,7 @@ public class IndexPStateTest {
     @Order(12)
     void testCategoryIndexPermissionSlipContainsEvtB() {
         Set<String> permSlipEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
         assertNotNull(permSlipEvents, "PERMISSION_SLIP set should exist");
         assertTrue(permSlipEvents.contains("evt-B"),
             "PERMISSION_SLIP set should contain evt-B");
@@ -184,7 +184,7 @@ public class IndexPStateTest {
     @Order(13)
     void testCategoryIndexDeadlineContainsEvtD() {
         Set<String> deadlineEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("DEADLINE"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("DEADLINE"));
         assertNotNull(deadlineEvents, "DEADLINE set should exist");
         assertTrue(deadlineEvents.contains("evt-D"),
             "DEADLINE set should contain evt-D");
@@ -194,7 +194,7 @@ public class IndexPStateTest {
     @Order(14)
     void testSchoolEventHasExactlyTwoEvents() {
         Set<String> schoolEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("SCHOOL_EVENT"));
         assertNotNull(schoolEvents);
         assertEquals(2, schoolEvents.size(),
             "SCHOOL_EVENT should have exactly 2 events (evt-A, evt-C)");
@@ -204,7 +204,7 @@ public class IndexPStateTest {
     @Order(15)
     void testPermissionSlipHasExactlyOneEvent() {
         Set<String> permSlipEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("PERMISSION_SLIP"));
         assertNotNull(permSlipEvents);
         assertEquals(1, permSlipEvents.size(),
             "PERMISSION_SLIP should have exactly 1 event (evt-B)");
@@ -214,7 +214,7 @@ public class IndexPStateTest {
     @Order(16)
     void testDeadlineHasExactlyOneEvent() {
         Set<String> deadlineEvents = (Set<String>)
-            eventsByCategory.selectOne(Path.key(FAMILY_ID).key("DEADLINE"));
+            eventsByTag.selectOne(Path.key(FAMILY_ID).key("DEADLINE"));
         assertNotNull(deadlineEvents);
         assertEquals(1, deadlineEvents.size(),
             "DEADLINE should have exactly 1 event (evt-D)");

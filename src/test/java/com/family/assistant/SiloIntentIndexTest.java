@@ -201,6 +201,6 @@ public class SiloIntentIndexTest {
         assertEquals("DECISION_NEEDED", event.get("intent"),
             "intent field should be persisted on the event record");
         assertTrue(((List<?>) event.get("tags")).contains("TASK"),
-            "eventType must remain untouched by the silo/intent addition");
+            "tags must remain intact (still contain TASK) after the silo/intent fields were added");
     }
 }
