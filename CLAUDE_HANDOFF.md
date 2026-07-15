@@ -290,6 +290,33 @@ this session):** (1) wire the classifier to populate `confidence`/`reason`; (2) 
 id-resolver + sender-tagging (currently holds child name only); (3) the multi-event
 extraction below is now easier because `tags` already accepts multiple values per event.
 
+## Recently Completed (2026-07-14) — search-agent compound-filter test coverage
+
+A task framed as "build a compound search-agent" (`parse-filters → resolve-indexes →
+intersect → finalize`) turned out to already exist, unchanged, since the 2026-07-03
+session, and to already resolve correctly against the post-2026-07-05-refactor
+`tags`/`personId` schema — the inverted indexes are populated via `Ops.EXPLODE` fan-out
+(one write per list element), so a single-value lookup against `$$events-by-tag`/
+`$$events-by-person` already *is* list-containment matching, no extra logic needed.
+Audited with file+line evidence rather than trusting the task brief's "this is new work"
+framing; see `REASONING.md`'s "Audit before 'Piece 2: search-agent' task" for the full
+trail. Zero production code changed (`QueryModule.java`, `FamilySchemaModule.java`
+untouched).
+
+The actual gap was test coverage: `SearchAgentTest`'s original 6 tests never populated a
+non-empty `personId` or a >1-element `tags` list, so containment *through search-agent*
+(as opposed to the raw index, covered by `MultiValueIndexTest`) was unexercised. Added
+tests 7-9: personId containment on a non-first list element, tags containment on a
+non-first list element (with genuine wrong-dimension exclusion controls), and a 3-way
+compound tag+personId+date-range intersection. **126/126 non-LLM tests green** (was
+123/123), zero regressions.
+
+**Deliberately not done this session** (flagged, user declined): `QueryModule.QueryParams`
+still names its fields `childName`/`categoryFilter`, not `personId`/`tags` — functionally
+correct (verified above) but inconsistent with current schema vocabulary. Renaming would
+also touch `interpret-query`'s LLM prompt JSON schema. Revisit if it becomes confusing in
+a future session.
+
 ## Next Task
 
 **Multi-event extraction in `EmailParsingModule`** — one email currently always yields
