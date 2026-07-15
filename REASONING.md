@@ -1402,3 +1402,96 @@ steps (`reuseForks=false`, or an upstream question) for the user to scope separa
 
 Nothing committed yet — about to commit this sub-task's work as its own commit, then
 stop for go-ahead before starting the parser work (R1/R2/R3), per the approved sequencing.
+
+## 2026-07-14 — Audit before "Piece 2: search-agent" task
+
+### Working directory verification
+`git status` confirms `/Users/toddkeelingfolder/CORSAIR/family_assistant` is the real
+repo (branch `feature/raw-ingestion-depot`, clean tree, real commit history through
+`377112c`). Did not touch the `/Volumes` scratch path.
+
+### Major finding: the requested search-agent already exists
+The task brief described building a `parse-filters → resolve-indexes → intersect →
+finalize` search-agent as new work ("Piece 2"). It is not new. `git log` shows it was
+built 2026-07-03 (commit `58de389`, "Compound search complete...") *before* the
+Session-2 schema refactor (`583fb97`, 2026-07-05, `eventType`→`tags`,
+`childName`/`childId`→`personId`). I initially suspected the refactor might have left it
+stale against the old field names — that turned out to be false.
+
+Read `QueryModule.java` in full: the agent graph, node names, and two-tier HARD/SOFT
+dimension model described in the task brief are already implemented verbatim
+(`QueryModule.java:317-515`). It already resolves against the renamed
+`$$events-by-tag`/`$$events-by-person` indexes (`:365-366`), and a code comment at
+`:360-362` already documents *why* a single-value lookup against those renamed indexes
+correctly implements list-containment semantics: each index was populated by fanning
+out one write per list element (`FamilySchemaModule.java:193-205`, `Ops.EXPLODE` +
+`anchor`/`hook`), so `psPerson.selectOne(key(familyId).key(childName))` inherently
+returns "events whose `personId` list contains `childName`" — no extra containment
+logic needed anywhere in `search-agent`.
+
+Ran the real non-LLM suite (not trusted from docs) via
+`mvn test` + `target/surefire-reports/*.txt`: 123/123 non-LLM tests green, counts sum
+exactly to the 123 `CLAUDE_HANDOFF.md` claims (including `RawEmailDepotTest`, 4, not yet
+listed in that doc's test table — a doc gap, not a code problem). `SearchAgentTest`:
+6/6 green. Only failures are `QueryAgentTest` (1 failure) and `ZooEmailTest` (1 error) —
+both `@Tag("llm")`, both pre-existing and already diagnosed in `CLAUDE_HANDOFF.md`
+(date-extraction non-determinism; `InProcessCluster` executor-pool lifecycle issue),
+unrelated to search.
+
+### Real gap found: test coverage, not implementation
+`SearchAgentTest.java`'s fixture (`:108-130`) gives every event an **empty** `personId`
+list (`new ArrayList<String>()`) and at most **one** `tags` element. So while the
+underlying containment mechanism is proven generically by `MultiValueIndexTest` (raw
+index, not through search-agent) and the tag/keyword/date HARD∩SOFT logic is proven by
+`SearchAgentTest`, nothing exercises: (a) a `personId` filter actually matching a real
+value through `search-agent`, (b) a single event carrying >1 `tags`/`personId` element
+through `search-agent`, or (c) the exact three-dimension compound query the task's GATE
+describes (tag + personId + date range together, asserting correct intersection). This
+is the one concrete, honest gap between "what exists" and "what the task asked for."
+
+Also flagging, not assuming: `QueryModule.QueryParams` still names its fields
+`childName`/`categoryFilter` (`:81-91`, `:142-149` in the test), not `personId`/`tags`.
+Functionally correct (verified above) but inconsistent with current schema vocabulary.
+Renaming is a design choice with a real blast radius (the LLM prompt's JSON keys at
+`:182-206`, every call site) — surfacing it for a decision rather than doing it
+unasked.
+
+Proceeding to write up requirements + Phase A summary + a plan scoped to the actual gap
+(test coverage + optional naming decision), not a reimplementation, and stopping for
+approval before writing any code.
+
+### Approved: test-coverage-only plan, no field rename
+User picked "test-coverage plan only" over the field-rename option — `QueryParams`
+stays `childName`/`categoryFilter` for now; not touching `QueryModule.java` or
+`FamilySchemaModule.java`.
+
+### Implementation
+Added `SearchAgentTest.java` tests 7-9 in a new isolated fixture family
+(`PERSON_FAMILY_ID`, 4 events: `evt-P1..P4`) — multi-element `tags`/`personId` on
+`evt-P1` (`[SCHOOL_EVENT, FIELD_TRIP]` / `[Alice, Bob]`), with `evt-P2`/`evt-P4` as
+single-wrong-dimension controls and `evt-P3` as a two-wrong-dimensions control, so each
+new test has a genuine "must exclude" assertion, not just a "must include" one:
+- Test 7: personId containment on Bob, the 2nd element of `evt-P1`'s list.
+- Test 8: tags containment on FIELD_TRIP, the 2nd element of `evt-P1`'s list, narrow
+  date range as the HARD anchor (SOFT-only would correctly stay empty per test 6's
+  invariant, so every new SOFT-dimension test needed a HARD anchor alongside it).
+- Test 9 (the literal GATE scenario): tag + personId + date range together, asserting
+  `evt-P1` is the sole match and `results.size() == 1`.
+
+Added a new `appendEventMulti` helper (not touching the existing `appendEvent`, still
+used by tests 1-6) that wraps incoming lists in `new ArrayList<>(...)` before storing —
+call sites use `List.of(...)` for readability, but the object that actually reaches the
+depot is a mutable `ArrayList`, per the verified `List.of()`-in-depot-payloads
+constraint in `RAMA_VERIFIED_LEARNINGS.md`.
+
+Verified: `mvn test-compile` clean. `SearchAgentTest` alone: 9/9 green. Full suite:
+126/126 non-LLM green (123 + 3 new), same two pre-existing `@Tag("llm")` failures as
+before (`QueryAgentTest`, `ZooEmailTest`) — both already diagnosed, unrelated to search,
+unchanged by this session. No production code touched (`QueryModule.java`,
+`FamilySchemaModule.java` unmodified — confirmed the search-agent needed zero changes).
+
+Updated `CLAUDE_HANDOFF.md`: test count 123→126, `SearchAgentTest` row 6→9 tests with
+the new coverage described, added the missing `RawEmailDepotTest` row (a pre-existing
+doc gap noticed during the audit, unrelated to this task but cheap to fix in passing).
+
+Not yet committed — reporting completion and awaiting go-ahead before committing.

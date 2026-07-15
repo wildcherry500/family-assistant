@@ -36,15 +36,21 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class SearchAgentTest {
 
-    private static final String FAMILY_ID       = "search-agent-test-family";
-    private static final String SCAN_FAMILY_ID  = "search-agent-scan-family";
-    private static final String TIMEZONE        = "America/Los_Angeles";
+    private static final String FAMILY_ID        = "search-agent-test-family";
+    private static final String SCAN_FAMILY_ID   = "search-agent-scan-family";
+    private static final String PERSON_FAMILY_ID = "search-agent-person-family";
+    private static final String TIMEZONE         = "America/Los_Angeles";
 
     // Within the "March" range used by the date-range test.
     private static final long T1_MAR20 = Instant.parse("2026-03-20T08:00:00Z").toEpochMilli();
     // Same keyword as evt-A, but far outside the March range.
     private static final long T_FAR    = Instant.parse("2026-06-01T08:00:00Z").toEpochMilli();
     private static final long T2_MAR22 = Instant.parse("2026-03-22T08:00:00Z").toEpochMilli();
+
+    // Compound tag+personId+date fixture (tests 7-9).
+    private static final long T_APR10  = Instant.parse("2026-04-10T08:00:00Z").toEpochMilli();
+    // Same personId as evt-P1/evt-P4, but far outside the April-10 range.
+    private static final long T_PFAR   = Instant.parse("2026-09-01T08:00:00Z").toEpochMilli();
 
     private InProcessCluster ipc;
     private Depot familyEventsDepot;
@@ -94,6 +100,33 @@ public class SearchAgentTest {
             "VAULT", "FYI", T2_MAR22);
 
         waitForEventsIndexed(SCAN_FAMILY_ID, 2, 10_000);
+
+        // --- Isolated family for multi-element tags/personId containment + the
+        // compound tag+personId+date GATE scenario (tests 7-9) ---
+        // evt-P1: the target — multi-element tags AND multi-element personId,
+        // Bob/FIELD_TRIP/SCHOOL_EVENT are each a NON-FIRST list element, and every
+        // dimension (tag, person, date) genuinely matches.
+        appendEventMulti("evt-P1", PERSON_FAMILY_ID, "Field trip permission",
+            "Field trip details", List.of("SCHOOL_EVENT", "FIELD_TRIP"),
+            List.of("Alice", "Bob"), T_APR10);
+        // evt-P2: right tag + right date, WRONG person (Carol, not Bob) — proves the
+        // personId dimension actually excludes, not just passes through.
+        appendEventMulti("evt-P2", PERSON_FAMILY_ID, "School event for Carol",
+            "Some other school event", List.of("SCHOOL_EVENT"),
+            List.of("Carol"), T_APR10);
+        // evt-P3: right person (Bob), WRONG tag + WRONG date (far outside April 10).
+        // Used by test 7's wide date range to prove personId containment alone
+        // matches a single-element list too, alongside evt-P1's non-first-element case.
+        appendEventMulti("evt-P3", PERSON_FAMILY_ID, "Unrelated task for Bob",
+            "Task details", List.of("TASK"),
+            List.of("Bob"), T_PFAR);
+        // evt-P4: right person + right date, WRONG tag (TASK, not SCHOOL_EVENT) —
+        // proves the tag dimension actually excludes in the 3-way compound test.
+        appendEventMulti("evt-P4", PERSON_FAMILY_ID, "Reminder task for Bob",
+            "Task details", List.of("TASK"),
+            List.of("Bob"), T_APR10);
+
+        waitForEventsIndexed(PERSON_FAMILY_ID, 4, 10_000);
     }
 
     @AfterAll
@@ -121,6 +154,34 @@ public class SearchAgentTest {
         event.put("startTime",    startTime);
         event.put("deadline",     null);
         event.put("personId",     new ArrayList<String>());
+        event.put("status",       "pending");
+        event.put("sourceType",   "test");
+        event.put("accountLabel", null);
+        event.put("created",      System.currentTimeMillis());
+        event.put("updated",      System.currentTimeMillis());
+        familyEventsDepot.append(event);
+    }
+
+    /**
+     * Like {@link #appendEvent} but takes full tags/personId lists directly, for
+     * multi-element containment fixtures. Wraps the incoming lists in new
+     * ArrayList<>() before storing — the depot payload must be a mutable
+     * ArrayList, never a List.of() literal, per RAMA_VERIFIED_LEARNINGS.md.
+     */
+    private void appendEventMulti(String id, String familyId, String title, String description,
+                                   List<String> tags, List<String> personId, long startTime) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("id",           id);
+        event.put("familyId",     familyId);
+        event.put("title",        title);
+        event.put("description",  description);
+        event.put("emailSubject", null);
+        event.put("tags",         new ArrayList<>(tags));
+        event.put("silo",         "VAULT");
+        event.put("intent",       "ACTION_REQUIRED");
+        event.put("startTime",    startTime);
+        event.put("deadline",     null);
+        event.put("personId",     new ArrayList<>(personId));
         event.put("status",       "pending");
         event.put("sourceType",   "test");
         event.put("accountLabel", null);
@@ -262,5 +323,69 @@ public class SearchAgentTest {
 
         assertTrue(results.isEmpty(),
             "All-soft empty intersection with no HARD dimension present must stay empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: personId containment matches a NON-FIRST list element
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(7)
+    void testPersonIdContainmentMatchesNonFirstListElement() {
+        // Wide date range (HARD anchor, matches all 4 fixture events) + childName="Bob".
+        // evt-P1 carries personId=[Alice, Bob] — Bob is the SECOND element, proving
+        // containment isn't just "matches the first/only element." evt-P3/evt-P4 carry
+        // personId=[Bob] (single element, trivial match). evt-P2 carries personId=[Carol]
+        // and must be excluded.
+        QueryModule.QueryParams p = params(PERSON_FAMILY_ID,
+            null, "2026-01-01", "2026-12-31", "Bob", null, null, null);
+        List<Map<String, Object>> results = search(p);
+
+        assertTrue(containsEvent(results, "evt-P1"), "Bob is the 2nd element of evt-P1's personId list");
+        assertTrue(containsEvent(results, "evt-P3"), "Bob is evt-P3's only personId element");
+        assertTrue(containsEvent(results, "evt-P4"), "Bob is evt-P4's only personId element");
+        assertFalse(containsEvent(results, "evt-P2"), "evt-P2's personId is [Carol], not Bob");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: tags containment matches a NON-FIRST list element and genuinely filters
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(8)
+    void testTagsContainmentMatchesNonFirstListElementAndFilters() {
+        // Narrow date range covering only April 10th (HARD anchor — excludes evt-P3,
+        // which is in September) + categoryFilter="FIELD_TRIP", the SECOND element of
+        // evt-P1's tags list [SCHOOL_EVENT, FIELD_TRIP].
+        QueryModule.QueryParams p = params(PERSON_FAMILY_ID,
+            null, "2026-04-10", "2026-04-10", null, "FIELD_TRIP", null, null);
+        List<Map<String, Object>> results = search(p);
+
+        assertTrue(containsEvent(results, "evt-P1"), "FIELD_TRIP is the 2nd element of evt-P1's tags list");
+        assertFalse(containsEvent(results, "evt-P2"), "evt-P2's tags are [SCHOOL_EVENT] only, no FIELD_TRIP");
+        assertFalse(containsEvent(results, "evt-P4"), "evt-P4's tags are [TASK] only, no FIELD_TRIP");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 (GATE): compound tag + personId + date range, three dimensions together
+    // -----------------------------------------------------------------------
+
+    @Test
+    @Order(9)
+    void testCompoundTagPersonAndDateRangeIntersectCorrectly() {
+        // All three dimensions must agree for evt-P1 to be the sole match:
+        //   tag=SCHOOL_EVENT, person=Bob, date=April 10th.
+        // evt-P2 matches tag+date but has the wrong person (Carol).
+        // evt-P4 matches person+date but has the wrong tag (TASK).
+        // evt-P3 matches person only (wrong tag, wrong date).
+        QueryModule.QueryParams p = params(PERSON_FAMILY_ID,
+            null, "2026-04-10", "2026-04-10", "Bob", "SCHOOL_EVENT", null, null);
+        List<Map<String, Object>> results = search(p);
+
+        assertTrue(containsEvent(results, "evt-P1"), "evt-P1 matches all three dimensions");
+        assertFalse(containsEvent(results, "evt-P2"), "evt-P2 has the wrong personId (Carol, not Bob)");
+        assertFalse(containsEvent(results, "evt-P3"), "evt-P3 has the wrong tag and wrong date");
+        assertFalse(containsEvent(results, "evt-P4"), "evt-P4 has the wrong tag (TASK, not SCHOOL_EVENT)");
+        assertEquals(1, results.size(), "Exactly one event should satisfy all three dimensions");
     }
 }

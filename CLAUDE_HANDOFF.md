@@ -15,10 +15,14 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **123/123 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
-  2026-07-05 schema refactor (Session 2: `eventType`→`tags`, `childName`/`childId`→`personId`,
-  + plumbed classifier fields). +12 vs the prior 111 = the new `MultiValueIndexTest` (8) plus
-  reworked index-test assertions.
+- **126/126 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+  2026-07-14 `SearchAgentTest` expansion (+3: personId containment on a non-first list
+  element, tags containment on a non-first list element, and a 3-way compound
+  tag+personId+date-range intersection — the search-agent itself needed no changes,
+  see `REASONING.md`'s "Audit before 'Piece 2: search-agent' task"). Prior to that,
+  123/123 as of the 2026-07-05 schema refactor (Session 2: `eventType`→`tags`,
+  `childName`/`childId`→`personId`, + plumbed classifier fields). +12 vs the prior 111 =
+  the new `MultiValueIndexTest` (8) plus reworked index-test assertions.
 - LLM-tagged suite: `EmailIngestionTest`/`FamilyAssistantTest` (5 tests) green as of the
   2026-07-03 `GmailMessage`/`String` call-site fix. `QueryAgentTest` (4 tests) is flaky —
   a 3-consecutive-run audit the same day showed 3/4, 2/4, 3/4, never 4/4 — root cause is
@@ -128,7 +132,7 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (123 tests, all non-LLM)
+## Test Suite (126 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
@@ -141,8 +145,9 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 | `AccountLabelTest` | 8 | `$$events-by-account` index + DigestModule account filtering |
 | `SiloIntentIndexTest` | 8 | `$$events-by-silo`/`$$events-by-intent` population and isolation |
 | `QueryIndexTest` | 7 | `$$events-by-person` and `$$events-by-tag` range assertions |
-| `SearchAgentTest` | 6 | `search-agent`'s two-tier hard/soft intersection — zero-dimension full scan, wrong-SOFT+right-HARD rescue, wrong-HARD+right-SOFT control (stays empty), HARD∩HARD genuine filtering, SOFT narrowing in the non-fallback path, all-SOFT-no-HARD-anchor stays empty |
+| `SearchAgentTest` | 9 | `search-agent`'s two-tier hard/soft intersection — zero-dimension full scan, wrong-SOFT+right-HARD rescue, wrong-HARD+right-SOFT control (stays empty), HARD∩HARD genuine filtering, SOFT narrowing in the non-fallback path, all-SOFT-no-HARD-anchor stays empty, personId containment on a non-first list element, tags containment on a non-first list element (and that it genuinely excludes), 3-way compound tag+personId+date-range intersection. Added 2026-07-14 (+3 tests): the 6 original tests never populated a non-empty `personId` or a >1-element `tags` list, so containment through `search-agent` itself (as opposed to the raw index, covered by `MultiValueIndexTest`) was unexercised. |
 | `DateIndexTest` | 6 | `$$events-by-date` range queries, effectiveTime logic |
+| `RawEmailDepotTest` | 4 | `*raw-emails` write-ahead depot → `$$raw-emails` PState drain |
 | `EmailIngestionTest` | 2 | Batch fan-out, blank/null filtering |
 | `FamilyAssistantTest` | 2 | Schema module + depot smoke test |
 | `GmailIngestionTest` | 1 | Live Gmail fetch (skips gracefully if no unread) |
