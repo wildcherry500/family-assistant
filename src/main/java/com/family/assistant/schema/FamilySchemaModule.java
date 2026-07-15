@@ -9,7 +9,11 @@ import com.rpl.rama.Path;
 import com.rpl.rama.RamaModule;
 import com.rpl.rama.ops.Ops;
 
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * FamilySchemaModule
@@ -32,6 +36,14 @@ import java.util.Map;
  *   $$events-by-silo     — familyId -> silo (VAULT/OFFICE/STUDIO/UNKNOWN) -> Set<eventId>
  *   $$events-by-intent   — familyId -> intent (ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN) -> Set<eventId>
  *   $$events-by-keyword  — familyId -> keyword (tokenized title+description+emailSubject) -> Set<eventId>
+ *   $$edges-forward      — familyId -> subjectId(eventId) -> relation (MENTIONS_PERSON/PART_OF/
+ *                          LOCATED_AT/ACTION_NEEDED/UNKNOWN) -> Set<objectId>
+ *   $$edges-inverse      — familyId -> objectId -> relation -> Set<subjectId>(eventId)
+ *   $$entities           — familyId -> entityId -> { "type"->String, "canonicalName"->String,
+ *                          "aliases"->Set<String> }. entityId = hash(eventId|objectType|object) —
+ *                          one row per distinct mention, not deduped across events; aliases starts
+ *                          empty, populated only by a future entity-resolution effort.
+ *   $$entities-by-type   — familyId -> entityType (PERSON/ORG/PLACE/PROJECT/UNKNOWN) -> Set<entityId>
  *   $$leverage-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "weight"->Long }
  *   $$weakness-map       — familyId -> entryId -> { "silo"->String|null, "intent"->String|null, "tag"->String, "note"->String }
  *
@@ -63,6 +75,29 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         Object dl = record.get("deadline");
         if (dl instanceof Long) return (Long) dl;
         return null;
+    }
+
+    /**
+     * Deterministic per-mention entity ID: hash(eventId|objectType|object), no mention
+     * index. Two different relations targeting the same object+type within one event
+     * collapse to the same entityId (a single $$entities row, not one per relation-slot);
+     * two different events mentioning the same object+type still mint different entityIds
+     * until a future entity-resolution effort merges them. Must be nameUUIDFromBytes, never
+     * randomUUID — Rama requires deterministic processing for PStates recomputed from depot
+     * data (verified: redplanetlabs.com/docs/~/operating-rama.html, "Task scaling" section).
+     */
+    private static String mintEntityId(String eventId, String objectType, String object) {
+        String key = eventId + "|" + objectType + "|" + object;
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    /** Entity record shape for $$entities. aliases starts empty — populated only by a future resolution effort. */
+    private static Map<String, Object> buildEntityRecord(String objectType, String object) {
+        Map<String, Object> entity = new HashMap<>();
+        entity.put("type", objectType);
+        entity.put("canonicalName", object);
+        entity.put("aliases", new HashSet<String>());
+        return entity;
     }
 
     @Override
@@ -141,6 +176,33 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
+        // Typed relation edge, forward direction: familyId -> subjectId(eventId) -> relation -> Set<objectId>
+        stream.pstate("$$edges-forward",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class,
+                        PState.setSchema(String.class)))));
+
+        // Typed relation edge, inverse direction: familyId -> objectId -> relation -> Set<subjectId>(eventId)
+        stream.pstate("$$edges-inverse",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class,
+                        PState.setSchema(String.class)))));
+
+        // Entity foundation: familyId -> entityId -> { type, canonicalName, aliases }
+        stream.pstate("$$entities",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class, Object.class))));
+
+        // Inverted index: familyId -> entityType -> Set<entityId> — makes the UNKNOWN bucket
+        // inspectable (a real indexed queue) rather than requiring a full $$entities scan.
+        stream.pstate("$$entities-by-type",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.setSchema(String.class))));
+
         // Config: familyId -> entryId -> leverage entry (silo/intent -> weight)
         configStream.pstate("$$leverage-map",
             PState.mapSchema(String.class,
@@ -202,6 +264,27 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .macro(Block.each(Ops.EXPLODE, "*persons").out("*person"))
           .localTransform("$$events-by-person",
               Path.key("*familyId").key("*person").nullToSet().voidSetElem().termVal("*eventId"))
+          .hook("fanoutRoot")
+          // Typed relation edges + entity foundation. "relations" is a List<Map> on the record
+          // (absent on records with no parser-side extraction; EXPLODE on an absent/empty list
+          // is a no-op, same as tags/personId above). One EXPLODE, then plain sequential writes
+          // off the same exploded triple — not a second EXPLODE, so no further anchor/hook
+          // isolation is needed within this branch (see the invariant explained above).
+          .select("*record", Path.key("relations")).out("*relations")
+          .macro(Block.each(Ops.EXPLODE, "*relations").out("*triple"))
+          .select("*triple", Path.key("relation")).out("*relation")
+          .select("*triple", Path.key("objectType")).out("*objectType")
+          .select("*triple", Path.key("object")).out("*object")
+          .macro(Block.each(FamilySchemaModule::mintEntityId, "*eventId", "*objectType", "*object").out("*objectId"))
+          .localTransform("$$edges-forward",
+              Path.key("*familyId").key("*eventId").key("*relation").nullToSet().voidSetElem().termVal("*objectId"))
+          .localTransform("$$edges-inverse",
+              Path.key("*familyId").key("*objectId").key("*relation").nullToSet().voidSetElem().termVal("*eventId"))
+          .macro(Block.each(FamilySchemaModule::buildEntityRecord, "*objectType", "*object").out("*entityRecord"))
+          .localTransform("$$entities",
+              Path.key("*familyId").key("*objectId").termVal("*entityRecord"))
+          .localTransform("$$entities-by-type",
+              Path.key("*familyId").key("*objectType").nullToSet().voidSetElem().termVal("*objectId"))
           .hook("fanoutRoot")
           // Tokenize title+description+emailSubject and fan out one write per token
           .macro(Block.each(EventUtils::tokenizeEvent, "*record").out("*tokens"))

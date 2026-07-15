@@ -1495,3 +1495,222 @@ the new coverage described, added the missing `RawEmailDepotTest` row (a pre-exi
 doc gap noticed during the audit, unrelated to this task but cheap to fix in passing).
 
 Not yet committed — reporting completion and awaiting go-ahead before committing.
+
+## 2026-07-15 — Graph schema evolution: typed relations + entity foundation (DESIGN ONLY)
+
+Scope was explicitly design-only: propose PState schemas and the parser's triple JSON
+contract for typed relation edges and a first-class `$$entities` table, step 1 of a
+four-part path between search and future "Layer 2 commitments." Entity resolution and
+co-occurrence edges were out of scope by the task brief. No code or topology was
+implemented this session; the full plan (schemas, write-path design, audit evidence) is
+at `/Users/toddkeelingfolder/.claude/plans/eventual-sniffing-lamport.md`.
+
+### Audit summary (full evidence in the plan file)
+Confirmed the existing `Ops.EXPLODE` + `anchor`/`hook` fan-out pattern
+(`FamilySchemaModule.java:186-210`) is what the new triple-edge writes reuse — same
+`nullToSet().voidSetElem().termVal(...)` shape already used by
+`$$events-by-tag`/`$$events-by-person`. Confirmed the parse-time integration point
+(`EmailParsingModule.java`, extract-details call `:243-271`) currently deserializes into
+`Map<String,String>` — adding a nested `"relations"` array forces that target to widen
+to `Map<String,Object>`, which touches 4 existing field-read lines with casts (mechanical,
+not behavioral, called out rather than claimed as zero-diff). Confirmed no entity registry
+exists anywhere (`FamilyMembers`/`FamilyConfig`/`EntityRegistry` all grep to nothing) —
+entity UUID minting is genuinely new logic, not something I missed. Confirmed additivity:
+every PState is its own independent `stream.pstate(...)` call, and both `QueryModule.java`
+and `DigestModule.java` fetch PStates by hardcoded name, never by iteration — new PStates
+are invisible to existing consumers by construction (same additivity already proven true
+for the `-by-person`/`-by-tag` refactor per the 2026-07-14 entry above).
+
+### Determinism verification (VERIFY-AT-SOURCE)
+Chat-o-rama was unreachable this session (browser extension not connected). Fell back to
+RPL docs per the project's verify-at-source rule: `redplanetlabs.com/docs/~/operating-rama.html`,
+"Task scaling" section, states PState recomputation from depot data "only works if your
+processing is deterministic, which may not be the case if your processing makes use of
+any random numbers (such as UUIDs)." This is Rama's own documentation naming random UUIDs
+as the canonical determinism violation — grounds the decision to mint entity IDs via
+`UUID.nameUUIDFromBytes(...)`, never `UUID.randomUUID()`, computed inside
+`FamilySchemaModule`'s deterministic stream topology (not the LLM-touching parser layer).
+Separately confirmed `eventId` itself is already deterministic
+(`EmailParsingModule.java:297-301`, `eventId = gmailMessageId` with a `randomUUID()`
+fallback only when `gmailMessageId` is blank — flagged as a pre-existing, unresolved edge
+case, not introduced by this design). Also clarified two distinct "replay" concepts only
+one of which Rama natively guarantees: re-running the LLM parse over old emails
+("DEFERRED: Email replay capability", `CLAUDE_HANDOFF.md:345-352`) is non-deterministic
+and explicitly not-yet-built; redraining the already-committed `*family-events` depot
+through the deterministic stream topology is the native, guaranteed operation — this
+design depends only on the latter.
+
+### Key decision: entity-ID hash drops the mention index
+Original hash formula was `hash(eventId | objectType | object | index)` — one entity
+row per triple *slot*. User caught that this makes `$$entities` behave like a mention
+log despite its entity-shaped schema (type/canonicalName/aliases): the same object+type
+mentioned via two different relations in one event should collapse to one row, not two.
+Revised to `hash(eventId | objectType | object)`, no index. Re-traced the write-path
+design against this change before accepting it: every write is either an idempotent
+`Set.add` (`$$edges-forward`/`-inverse`) or a same-key/same-value overwrite (`$$entities`),
+and nothing in the topology reads or branches on array position — dropping the index is
+safe, not just tolerated, and actually fixes a latent duplication bug rather than trading
+one problem for another. No `$$mentions` rename fallback was needed. Cross-event
+distinctness is preserved (`eventId` stays in the hash); merging the same real-world
+entity across different events is still resolution's job, still out of scope.
+
+### Other decisions
+- `objectType` vocabulary finalized: `PERSON | ORG | PLACE | PROJECT | UNKNOWN`. `ORG`
+  added (missing from my draft; high-volume in this domain). `PROJECT` added as
+  `PART_OF`'s target type. `EVENT` deliberately excluded — event-to-event linkage
+  already exists via the (currently always-empty) `relatedEventIds` field on the event
+  record; not duplicated as an entity type.
+- `objectType` is part of the entity-ID hash, so a mis-typed mention (LLM tags something
+  `PLACE` that should've been `ORG`) mints a different `entityId` than the correctly-typed
+  version, splitting one real entity into two until resolution merges them. Accepted
+  trade-off, not a bug — recording it here so it isn't mistaken for one later.
+- Relation vocabulary: closed enum `MENTIONS_PERSON | PART_OF | LOCATED_AT | ACTION_NEEDED
+  | UNKNOWN`, prompt-constrained like the existing `category|silo|intent` pattern
+  (`EmailParsingModule.java:177-192`).
+- `DEADLINE_FOR` proposed then dropped: `deadline`/`startTime` are already scalar event
+  time-metadata feeding `$$events-by-date` directly; a triple needs a target entity, and
+  a deadline isn't a relation to one.
+- `ACTION_NEEDED` included: audited for a structural blocker to later promotion into a
+  richer Layer-2 commitment lifecycle and found none — the edge is stateless, Layer 2 can
+  read it as a seed signal or expand the relation vocabulary additively without touching
+  existing PState shape. Flagged, not resolved: semantic overlap with the existing scalar
+  `intent = ACTION_REQUIRED` field/`$$events-by-intent` index — the edge adds the "who"
+  dimension the scalar lacks (and gives a free per-person action queue via the inverse
+  index), but Layer 2 will need to decide how the two signals relate to each other.
+- Source-neutrality: triple emission must work identically for email today and a
+  confirmed second stream ("Brain Dump," zero prior repo trace — new context introduced
+  this session) without a rewrite. Turned out to already be structurally supported:
+  `eventRecord.put("sourceType", "email")` already exists as a generic origin field
+  (`EmailParsingModule.java:326`), and `FamilySchemaModule`'s topology has no hard
+  dependency on email-specific fields (`emailSubject` is the only one referenced, and
+  degrades gracefully to `""` when absent). The triple contract rides on the same shared,
+  already-source-agnostic depot/topology — no branching logic needed anywhere.
+- `WORK` type (songs/paintings/books/etc.) deliberately deferred to `UNKNOWN` rather than
+  guessed at now. Valid only because `UNKNOWN` is inspectable: added a fourth PState,
+  `$$entities-by-type` (`familyId -> type -> Set<entityId>`, same pattern as
+  `$$events-by-account`), so the `UNKNOWN` bucket is a real indexed queue, not a
+  scan-and-hope. Trigger condition for building a promoted `WORK` type: real recurring
+  volume showing up under that queue, not a guess made in this session.
+
+### Open items carried forward (not blocking, in the plan file §8)
+Exact `$$entities` write Path syntax needs confirming against `$$family-data`'s actual
+write code (not audited this session — Audit A covered the Set-based inverted indexes,
+not the record-store-style write). The `childId`/id-resolver comment at
+`EmailParsingModule.java:314-320` references the same concept the future entity-resolution
+brief will build — the two efforts should converge on one resolver, not two.
+
+Plan approved 2026-07-15. Stopping here per the task's explicit scope (design + this
+REASONING.md entry only) — no code, no topology implementation this session.
+
+## 2026-07-15 — Graph schema evolution: implementation
+
+User said "move on to implement" after approving the design plan above. Implemented
+exactly what the plan specified — no redesign, no simplification.
+
+### Resolving the one open implementation question before writing code
+Plan §8.1 flagged that `$$entities`'s write-path Path syntax (a direct key→value
+"record overwrite," not a Set-based inverted-index write) hadn't been audited. Read
+`FamilySchemaModule.java` in full before touching it: `$$family-data`'s write
+(`Path.key("*familyId").key("events").key("*eventId").termVal("*record")`,
+`FamilySchemaModule.java:161-162` pre-edit) is exactly that pattern — direct key path +
+`termVal`, no `nullToSet`. Confirms `$$entities` should write
+`Path.key("*familyId").key("*objectId").termVal("*entityRecord")`.
+
+Also needed to confirm `Block.each` supports multi-argument static methods (the entity-ID
+formula takes 3 inputs: eventId, objectType, object) — no example existed anywhere in
+this repo, only single-arg usage. Rather than guess, decompiled the pinned
+`rama-1.5.0.jar` (`~/.m2/repository/com/rpl/rama/1.5.0/rama-1.5.0.jar`) and ran `javap`
+on `com.rpl.rama.Block` directly: confirmed overloads exist up to
+`RamaFunction8`/`RamaOperation8` (`Block.each(RamaFunction2<T0,T1,R>, Object, Object)`,
+`RamaFunction3`, etc.), same verification method this file's own comments already used
+for `Ops.EXPLODE`/`anchor`/`hook`. No novel/undocumented API needed — the write path
+uses exactly the same tool family already proven in this codebase.
+
+### Implementation
+`FamilySchemaModule.java`: added `mintEntityId` (3-arg, deterministic hash per the
+approved formula) and `buildEntityRecord` (2-arg, builds the `{type, canonicalName,
+aliases}` map) as static helpers next to `effectiveTime`. Added 4 PState declarations
+(`$$edges-forward`, `$$edges-inverse`, `$$entities`, `$$entities-by-type`). Added a new
+branch inside the existing `anchor("fanoutRoot")`/`hook(...)` structure, inserted between
+the personId branch and the keyword branch — one `EXPLODE` over `"relations"`, then four
+sequential writes off the same exploded triple (not a second EXPLODE, so no further
+anchor/hook isolation needed, consistent with the invariant this file's own comments
+already document).
+
+`EmailParsingModule.java`: extended the extract-details prompt with the closed-enum
+`relations` field; widened the Jackson deserialization target from `Map<String,String>`
+to `Map<String,Object>` (required — a nested array doesn't fit the old type), which
+needed casts added to the 4 existing field-read lines, exactly the mechanical/non-behavioral
+consequence flagged in the plan's §4a/§6, not a surprise. Added `parseRelations` (mirrors
+`classify`'s regex-validation posture: malformed or unrecognized entries are dropped, not
+coerced to UNKNOWN — a shape we don't recognize isn't safely "unknown"). Added `relations`
+to `ParsedEvent` (appended as the last constructor param) and to the `eventRecord` map
+written to the depot.
+
+### Fixing what the plan didn't anticipate
+`mvn test` (before a clean rebuild) surfaced a `NoSuchMethodError` at runtime in
+`NonLlmPipelineTest.testParsedEventSerialization` — it directly constructs a
+`ParsedEvent` with the old 16-arg constructor. This should have been a compile error
+(the constructor signature changed), and the fact that it wasn't is itself worth
+recording: `mvn compile`/`test-compile` reported "Nothing to compile - all classes are
+up to date" because I'd already run them in isolation earlier in the session, so this
+particular `mvn test` invocation never re-checked `NonLlmPipelineTest.java` against the
+new signature — Maven's default incremental compiler doesn't always do full
+dependency-closure recompilation when an upstream method signature changes. Updated the
+test to pass a representative `relations` list and added a round-trip assertion on the
+new field, then ran `mvn clean test` (not just `mvn test`) to force a truly fresh build
+before trusting the result.
+
+### Proving the design decisions actually hold, not just that nothing broke
+The 126 pre-existing tests passing was necessary but not sufficient — none of their
+fixtures ever populate a `relations` field, so the entire new branch was previously
+compiled but never executed by any test. Added `EdgesEntityIndexTest` (10 tests,
+following `MultiValueIndexTest`'s established InProcessCluster/PState-assertion
+convention) specifically targeting the properties this session's decisions depended on,
+not just "does it write something": forward+inverse edges exist for every triple; two
+different relations targeting the same object+type *within one event* collapse to the
+same entityId (the exact mention-log-vs-entity-table distinction the user caught during
+design); the same object+type in *two different events* mints two different entityIds
+(no accidental cross-event dedup); `$$entities-by-type` actually indexes both PERSON
+mentions and the PLACE mention; an event with no `relations` key at all writes nothing to
+any of the 4 new PStates (backward compatibility with every pre-existing record shape);
+and — the test most directly tied to the redrain-safety argument in the design session —
+re-appending an identical record (simulating a depot redrain) mints no new entities and
+does not grow any edge Set, with the re-derived entityId asserted equal to the original.
+
+`mvn clean test`: **136/136 non-LLM tests green** (126 existing, unchanged + 10 new),
+zero regressions. Updated `CLAUDE_HANDOFF.md`: PState schema table (+4 rows), event
+record fields table (+`relations` row), test suite table (+`EdgesEntityIndexTest` row,
+126→136), Current Build Status line, and a new "Recently Completed (2026-07-15)" section
+summarizing this work for future sessions.
+
+### Pre-commit coverage check (caught a real gap, not a rubber stamp)
+Before committing, checked the test file against two specific coverage questions:
+does it assert BOTH edge directions for the same triple (not just each independently),
+and does it exercise `$$entities-by-type`'s `UNKNOWN` bucket specifically. Read the file
+rather than trusting memory of what I'd written.
+
+Forward+inverse: covered. `inverseEdgesPointBackAtTheSubjectEvent` uses
+`billyIdFromE1`/`jeffersonId`, both derived in `setup()` via `soleElement(forwardSet(...))`
+— so the inverse assertions are keyed by whatever the forward write actually produced, not
+an independently hardcoded ID. A bug that wrote the wrong objectId to forward, or the
+wrong key to inverse, would break this test. Genuine pairing, not two decoupled
+existence checks.
+
+UNKNOWN-bucket population: NOT covered — a real gap, not a false alarm. Every fixture in
+the file used PERSON/PLACE; nothing ever exercised `objectType: "UNKNOWN"`, so
+`$$entities-by-type["UNKNOWN"]` — the entire mechanism the `WORK`-type deferral depends
+on being real rather than aspirational — was asserted nowhere. Added one more event
+(`evt-E4`, a deliberately-unrecognized mention, "Blue Sky Symphony" — a song, tying back
+to the design session's own creative-work example) and one test asserting the UNKNOWN
+bucket contains it and resolves back to the correct `$$entities` row (type + raw
+canonicalName recoverable). Tiny follow-up, not a redo — the rest of the suite and the
+production code were untouched.
+
+`mvn clean test` (final): **137/137 non-LLM tests green** (126 existing + 11 in
+`EdgesEntityIndexTest`), zero regressions. Updated `CLAUDE_HANDOFF.md` counts and the
+`EdgesEntityIndexTest` row description accordingly (136→137, 10→11 tests).
+
+Committing this as a checkpoint — the commit message states what's done and what's
+deliberately deferred (resolution, co-occurrence) so the next session (resolution or
+Layer 2) can read scope from the commit, not reconstruct it from the diff.

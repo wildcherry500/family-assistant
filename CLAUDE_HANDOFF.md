@@ -15,14 +15,17 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **126/126 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
-  2026-07-14 `SearchAgentTest` expansion (+3: personId containment on a non-first list
-  element, tags containment on a non-first list element, and a 3-way compound
-  tag+personId+date-range intersection — the search-agent itself needed no changes,
-  see `REASONING.md`'s "Audit before 'Piece 2: search-agent' task"). Prior to that,
-  123/123 as of the 2026-07-05 schema refactor (Session 2: `eventType`→`tags`,
-  `childName`/`childId`→`personId`, + plumbed classifier fields). +12 vs the prior 111 =
-  the new `MultiValueIndexTest` (8) plus reworked index-test assertions.
+- **137/137 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+  2026-07-15 graph-schema-evolution session (+11: new `EdgesEntityIndexTest` covering
+  `$$edges-forward`/`$$edges-inverse`/`$$entities`/`$$entities-by-type` — see "Recently
+  Completed" below). Prior to that, 126/126 as of the 2026-07-14 `SearchAgentTest`
+  expansion (+3: personId containment on a non-first list element, tags containment on a
+  non-first list element, and a 3-way compound tag+personId+date-range intersection — the
+  search-agent itself needed no changes, see `REASONING.md`'s "Audit before 'Piece 2:
+  search-agent' task"). Prior to that, 123/123 as of the 2026-07-05 schema refactor
+  (Session 2: `eventType`→`tags`, `childName`/`childId`→`personId`, + plumbed classifier
+  fields). +12 vs the prior 111 = the new `MultiValueIndexTest` (8) plus reworked
+  index-test assertions.
 - LLM-tagged suite: `EmailIngestionTest`/`FamilyAssistantTest` (5 tests) green as of the
   2026-07-03 `GmailMessage`/`String` call-site fix. `QueryAgentTest` (4 tests) is flaky —
   a 3-consecutive-run audit the same day showed 3/4, 2/4, 3/4, never 4/4 — root cause is
@@ -83,6 +86,10 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | `$$events-by-silo` | `familyId -> silo` | `Set<eventId>` | VAULT/OFFICE/STUDIO/UNKNOWN; UNKNOWN is indexed (correction-loop) |
 | `$$events-by-intent` | `familyId -> intent` | `Set<eventId>` | ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN; UNKNOWN is indexed |
 | `$$events-by-keyword` | `familyId -> keyword` | `Set<eventId>` | Tokenized `title`+`description`+`emailSubject` (lowercase, `[^a-z0-9]+` split, 3-char min, ~40-word stopword list). Populated via `Ops.EXPLODE` fan-out. Since 2026-07-05 it shares the topology with the `tags` and `personId` fan-outs; all three are isolated as independent branches via `.anchor("fanoutRoot")`/`.hook(...)` to avoid cartesian write amplification — see `RAMA_VERIFIED_LEARNINGS.md`. Read by `QueryModule`'s `search-agent` as the primary/HARD search dimension. |
+| `$$edges-forward` | `familyId -> subjectId(eventId) -> relation` | `Set<objectId>` | Typed relation edges (MENTIONS_PERSON/PART_OF/LOCATED_AT/ACTION_NEEDED/UNKNOWN), forward direction. Added 2026-07-15. Populated from a `relations` List<Map> field on the event record via the same `Ops.EXPLODE`/`anchor`/`hook` branch pattern as tags/personId/keyword. |
+| `$$edges-inverse` | `familyId -> objectId -> relation` | `Set<subjectId>(eventId)` | Same edges, inverse direction. Added 2026-07-15. |
+| `$$entities` | `familyId -> entityId` | `{type, canonicalName, aliases}` | Entity foundation. Added 2026-07-15. `entityId = hash(eventId\|objectType\|object)` — deterministic (`UUID.nameUUIDFromBytes`, never `randomUUID`), one row per distinct mention within an event (two different relations targeting the same object+type in one event collapse to the same entityId), NOT deduped across events — that's a future entity-resolution effort. `aliases` starts as an empty `Set<String>`. |
+| `$$entities-by-type` | `familyId -> entityType` | `Set<entityId>` | PERSON/ORG/PLACE/PROJECT/UNKNOWN. Added 2026-07-15. Makes the `UNKNOWN` bucket an inspectable indexed queue — the trigger for eventually promoting a `WORK` type (creative-work mentions currently fall to UNKNOWN) is real recurring volume showing up here, not a guess. See `REASONING.md`'s 2026-07-15 entry. |
 | `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
 | `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
 
@@ -116,6 +123,7 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 | `description` | String | email body |
 | `tags` | `List<String>` | Classifier category values (SCHOOL_EVENT, DEADLINE, PERMISSION_SLIP, TASK, UNKNOWN). Replaced single-value `eventType` 2026-07-05; classifier still emits one category, so 0..1 element for now — the List shape lets a later parser attach several. |
 | `personId` | `List<String>` | Family members referenced by the email. Replaced `childName`/`childId` 2026-07-05. Currently holds the extracted child **name** (0..1 element) until an id-resolver session; sender-tagging not yet wired. |
+| `relations` | `List<Map<String,String>>` | **Added 2026-07-15.** Typed triples `{relation, objectType, object}` — subject is implicit (this record's own `id`). Closed enums: `relation` ∈ MENTIONS_PERSON/PART_OF/LOCATED_AT/ACTION_NEEDED/UNKNOWN, `objectType` ∈ PERSON/ORG/PLACE/PROJECT/UNKNOWN, validated in `EmailParsingModule.parseRelations` before landing here — malformed entries are dropped, not coerced to UNKNOWN. Source-neutral field name (no email-specific naming) — any future parser populating the same shape gets `$$edges-*`/`$$entities` materialization for free. |
 | `startTime` | Long | epoch ms |
 | `deadline` | Long | epoch ms |
 | `documentType` | String | **Schema-only (2026-07-05): plumbed, not yet populated — `null` this session.** |
@@ -132,10 +140,11 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (126 tests, all non-LLM)
+## Test Suite (137 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
+| `EdgesEntityIndexTest` | 11 | `$$edges-forward`/`$$edges-inverse`/`$$entities`/`$$entities-by-type` — forward+inverse edge materialization (paired: inverse assertions use the exact objectId extracted from the forward set, a genuine cross-direction consistency check, not two decoupled existence checks), entity-ID collapse within one event (two relations, same object+type → one entity row), cross-event distinctness (no dedup), `$$entities-by-type` inspectability for PERSON/PLACE **and the UNKNOWN bucket specifically** (a genuinely-unrecognized mention resolves back to its raw `canonicalName` via the index — the exact mechanism the `WORK`-type deferral depends on), no-op on an absent `relations` field, and idempotency under a simulated redrain (re-append the identical record, assert no new entities/no set growth, same entityId re-derived). Added 2026-07-15. |
 | `MultiValueIndexTest` | 8 | Multi-element `tags`/`personId` fan-out completeness, tag/person branch isolation (no field bleed), keyword-branch coexistence under `anchor`/`hook`, and classifier-field `null` round-trip. Added 2026-07-05. |
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
 | `CohenFamilyDatasetTest` | 19 | Real 21-day dataset (13 email records), all indexes |
@@ -316,6 +325,40 @@ still names its fields `childName`/`categoryFilter`, not `personId`/`tags` — f
 correct (verified above) but inconsistent with current schema vocabulary. Renaming would
 also touch `interpret-query`'s LLM prompt JSON schema. Revisit if it becomes confusing in
 a future session.
+
+## Recently Completed (2026-07-15) — Graph schema evolution: typed relations + entity foundation
+
+Design-then-implement session, step 1 of a four-part path between search and future
+"Layer 2 commitments." Entity resolution and co-occurrence edges were explicitly out of
+scope (separate future briefs) — see `REASONING.md`'s 2026-07-15 entries (a design-only
+entry with the full audit trail, followed by an implementation entry) for the complete
+decision record.
+
+Added 4 PStates to `FamilySchemaModule` (`$$edges-forward`, `$$edges-inverse`,
+`$$entities`, `$$entities-by-type` — schemas in the table above) and a `relations` field
+to the event record, emitted by `EmailParsingModule`'s extract-details LLM call as
+closed-enum triples (`{relation, objectType, object}`) and validated before landing on
+the record. All 4 new PStates are populated by a new branch in the existing
+`anchor("fanoutRoot")`/`hook(...)` fan-out structure — same `Ops.EXPLODE` pattern as
+tags/personId/keyword, verified via `javap` against the pinned `rama-1.5.0.jar` that
+`Block.each` has the needed multi-argument overloads (`RamaFunction2`/`RamaFunction3`)
+before writing the code.
+
+Entity IDs are deterministic (`hash(eventId|objectType|object)`, `UUID.nameUUIDFromBytes`,
+never `randomUUID`) so PState redrain reproduces identical IDs — grounded in Rama's own
+documented determinism requirement (`redplanetlabs.com/docs/~/operating-rama.html`,
+"Task scaling" section, fetched this session since Chat-o-rama was unreachable). The hash
+deliberately omits a mention-index: the same object+type reached via two different
+relations within one event collapses to one `$$entities` row, not one per relation-slot;
+cross-event distinctness is preserved (different events mentioning the same name still
+mint different entityIds until a future resolution effort merges them).
+
+Purely additive — zero existing PState declarations or `QueryModule.java`/`DigestModule.java`
+code touched. Fully backward compatible — every pre-existing record (none of which has a
+`relations` field) produces zero writes to the 4 new PStates, same no-op behavior as an
+absent `tags`/`personId` list. **137/137 non-LLM tests green** (was 126/126), zero
+regressions — new `EdgesEntityIndexTest` (11 tests) exercises the new branch directly,
+since no pre-existing fixture ever populated `relations`.
 
 ## Next Task
 

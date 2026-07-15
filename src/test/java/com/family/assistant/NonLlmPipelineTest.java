@@ -348,13 +348,20 @@ public class NonLlmPipelineTest {
     @Test
     @Order(33)
     void testParsedEventSerialization() throws Exception {
+        List<Map<String, String>> relations = new ArrayList<>();
+        Map<String, String> triple = new HashMap<>();
+        triple.put("relation", "MENTIONS_PERSON");
+        triple.put("objectType", "PERSON");
+        triple.put("object", "Billy");
+        relations.add(triple);
+
         EmailParsingModule.ParsedEvent original = new EmailParsingModule.ParsedEvent(
             "SCHOOL_EVENT", "Zoo Trip", "Visit to zoo",
             "2026-03-20T08:30:00Z", "2026-03-18T00:00:00Z",
             "billy", "Billy", "raw email body",
             "teacher@school.edu", "Mr. Jacobs", "Zoo Field Trip",
             "gmail-msg-123", System.currentTimeMillis(), "todd@gmail.com",
-            "VAULT", "ACTION_REQUIRED");
+            "VAULT", "ACTION_REQUIRED", relations);
 
         EmailParsingModule.ParsedEvent deserialized = roundTrip(original);
 
@@ -368,6 +375,7 @@ public class NonLlmPipelineTest {
         assertEquals(original.receivedAt, deserialized.receivedAt);
         assertEquals(original.silo, deserialized.silo);
         assertEquals(original.intent, deserialized.intent);
+        assertEquals(original.relations, deserialized.relations);
     }
 
     @Test

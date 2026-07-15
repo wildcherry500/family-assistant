@@ -79,13 +79,17 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         public final String accountLabel;   // Gmail account that received this email, may be null
         public final String silo;           // VAULT, OFFICE, STUDIO, or UNKNOWN
         public final String intent;         // ACTION_REQUIRED, DECISION_NEEDED, FYI, SCHEDULING, or UNKNOWN
+        // Typed relation triples: subject is implicit (this event's own id, filled in at
+        // write-to-store, never emitted by the LLM). Each entry: relation/objectType/object,
+        // all validated against a closed enum before landing here (see parseRelations).
+        public final List<Map<String, String>> relations;
 
         public ParsedEvent(String category, String title, String description,
                            String startTime, String deadline,
                            String childId, String childName, String sourceEmail,
                            String senderEmail, String senderName, String emailSubject,
                            String gmailMessageId, long receivedAt, String accountLabel,
-                           String silo, String intent) {
+                           String silo, String intent, List<Map<String, String>> relations) {
             this.category      = category;
             this.title         = title;
             this.description   = description;
@@ -102,6 +106,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
             this.accountLabel  = accountLabel;
             this.silo          = silo;
             this.intent        = intent;
+            this.relations     = relations;
         }
     }
 
@@ -246,9 +251,20 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                         + "{\"title\": \"short title\", "
                         + "\"startTime\": \"ISO-8601 datetime or null\", "
                         + "\"deadline\": \"ISO-8601 datetime or null\", "
-                        + "\"childName\": \"first name of child or student mentioned, or null\"}\n\n"
+                        + "\"childName\": \"first name of child or student mentioned, or null\", "
+                        + "\"relations\": [{\"relation\": \"MENTIONS_PERSON|PART_OF|LOCATED_AT|ACTION_NEEDED|UNKNOWN\", "
+                        + "\"objectType\": \"PERSON|ORG|PLACE|PROJECT|UNKNOWN\", \"object\": \"the mentioned name\"}]}\n\n"
                         + "For childName: extract any student or child first name explicitly mentioned "
                         + "(e.g. 'Billy', 'Emma'). Use null if no specific child is named.\n\n"
+                        + "For relations: emit one entry per distinct person, organization, place, or "
+                        + "project explicitly mentioned in the email. relation describes how it connects "
+                        + "to this email's event — MENTIONS_PERSON (a person is named), PART_OF (this "
+                        + "event/task is part of a larger project or effort), LOCATED_AT (a place is "
+                        + "where this happens), ACTION_NEEDED (this specific person needs to take "
+                        + "action, distinct from merely being mentioned). objectType is what kind of "
+                        + "thing \"object\" is. Use UNKNOWN for either field only when genuinely "
+                        + "uncertain — never guess. Omit relations entirely (empty array) if nothing "
+                        + "qualifies.\n\n"
                         + message.body;
                     String json = model.chat(extractPrompt).trim();
 
@@ -257,18 +273,20 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     String startTime = null;
                     String deadline  = null;
                     String childName = null;
+                    List<Map<String, String>> relations = new ArrayList<>();
                     try {
                         com.fasterxml.jackson.databind.ObjectMapper mapper =
                             new com.fasterxml.jackson.databind.ObjectMapper();
-                        Map<String, String> extracted = mapper.readValue(json,
-                            new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {});
-                        if (extracted.get("title") != null) title = extracted.get("title");
-                        String st = extracted.get("startTime");
-                        String dl = extracted.get("deadline");
-                        String cn = extracted.get("childName");
+                        Map<String, Object> extracted = mapper.readValue(json,
+                            new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                        if (extracted.get("title") instanceof String) title = (String) extracted.get("title");
+                        String st = (String) extracted.get("startTime");
+                        String dl = (String) extracted.get("deadline");
+                        String cn = (String) extracted.get("childName");
                         startTime = (st == null || st.equals("null")) ? null : st;
                         deadline  = (dl == null || dl.equals("null")) ? null : dl;
                         childName = (cn == null || cn.equals("null")) ? null : cn;
+                        relations = parseRelations(extracted.get("relations"));
                     } catch (Exception e) {
                         // keep fallback values set above
                     }
@@ -280,7 +298,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                         message.senderEmail, message.senderName,
                         message.emailSubject, message.gmailMessageId,
                         message.receivedAt, message.accountLabel,
-                        silo, intent
+                        silo, intent, relations
                     );
 
                     agentNode.emit("write-to-store", event);
@@ -326,6 +344,10 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("sourceType",     "email");
                     eventRecord.put("accountLabel",   event.accountLabel);
                     eventRecord.put("tags",           tags);
+                    // Typed relation triples (source-neutral contract — any future parser
+                    // populating this same field gets edge materialization for free from
+                    // FamilySchemaModule; subject is this record's own "id", filled in there).
+                    eventRecord.put("relations",      event.relations);
                     // Classifier-output fields — schema only this session. Plumbed into the record and
                     // serialization but NOT populated by the parsing agent; null/empty is the correct
                     // passing state until the classifier is wired to fill them. confidence is a Double
@@ -397,6 +419,39 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                 }
             }
         }
+    }
+
+    /**
+     * Validates the LLM's raw "relations" array against the closed relation/objectType
+     * enums before it reaches the depot — same never-guess posture as classify's
+     * category/silo/intent regex checks. Malformed or unrecognized entries are dropped,
+     * not coerced to UNKNOWN, since a shape we don't recognize isn't safely "unknown."
+     */
+    private List<Map<String, String>> parseRelations(Object raw) {
+        List<Map<String, String>> relations = new ArrayList<>();
+        if (!(raw instanceof List)) return relations;
+        for (Object item : (List<?>) raw) {
+            if (!(item instanceof Map)) continue;
+            Map<?, ?> m = (Map<?, ?>) item;
+            Object relationObj = m.get("relation");
+            Object objectTypeObj = m.get("objectType");
+            Object objectObj = m.get("object");
+            if (!(relationObj instanceof String) || !(objectTypeObj instanceof String)
+                    || !(objectObj instanceof String)) continue;
+            String relation = ((String) relationObj).toUpperCase();
+            String objectType = ((String) objectTypeObj).toUpperCase();
+            String object = (String) objectObj;
+            if (object.isBlank()) continue;
+            if (!relation.matches("MENTIONS_PERSON|PART_OF|LOCATED_AT|ACTION_NEEDED|UNKNOWN")) continue;
+            if (!objectType.matches("PERSON|ORG|PLACE|PROJECT|UNKNOWN")) continue;
+
+            Map<String, String> triple = new HashMap<>();
+            triple.put("relation", relation);
+            triple.put("objectType", objectType);
+            triple.put("object", object);
+            relations.add(triple);
+        }
+        return relations;
     }
 
     private String extractTitle(String email) {
