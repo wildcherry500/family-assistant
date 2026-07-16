@@ -1714,3 +1714,581 @@ production code were untouched.
 Committing this as a checkpoint — the commit message states what's done and what's
 deliberately deferred (resolution, co-occurrence) so the next session (resolution or
 Layer 2) can read scope from the commit, not reconstruct it from the diff.
+
+## 2026-07-16 — Layer 2: Commitments — audit-first design brief (DESIGN ONLY, forks pending)
+
+Scope: design only, no code, no topology changes. Deliverable is this entry plus a chat
+presentation of the same content, per the task's explicit "stop for fork decisions before
+any implementation" instruction. Plan file with the pre-audit scoping is at
+`/Users/toddkeelingfolder/.claude/plans/cheeky-purring-breeze.md`, approved with three
+amendments (deterministic commitment IDs as a hard requirement; resolve ordering, not just
+mutation, for the replayability fork; reframe the identity fork as confirming the standing
+entity-resolution deferral rather than reopening it).
+
+### Phase A audit (file:line evidence)
+
+**A1 — `ACTION_NEEDED` edge, current state.** Declared in the closed relation enum
+(`FamilySchemaModule.java:39-40`), populated at `FamilySchemaModule.java:273-282`: one
+`EXPLODE` over the record's `relations` list, then `$$edges-forward`
+(`familyId -> eventId -> relation -> Set<objectId>`) and `$$edges-inverse`
+(`familyId -> objectId -> relation -> Set<eventId>`) writes for every triple, `ACTION_NEEDED`
+included with no special-casing. Grepped `QueryModule.java` and `DigestModule.java` for
+`edges-forward`/`edges-inverse`/`$$entities`: zero hits. Confirmed — no consumer exists yet;
+this is genuinely an unconsumed seed signal, not an already-wired one.
+
+**A2 — scalar `intent` signal, current state.** `$$events-by-intent`
+(`FamilySchemaModule.java:161-164` declaration, `:236-239` write) is a *scalar* field on the
+event record (`ACTION_REQUIRED/DECISION_NEEDED/FYI/SCHEDULING/UNKNOWN`), one value per event —
+unlike `relations`, which is a list that can name several typed targets. It **is** consumed
+today: `QueryModule.java`'s `search-agent` reads it as a SOFT dimension (`intentFilter`,
+`QueryModule.java:91,187,370,436-441,546`). The two signals differ in shape (scalar-per-event
+vs. list-of-typed-edges-with-a-target) and in consumption state (one wired into search, one
+not wired anywhere) — this is the reconciliation the original brief flagged as due.
+
+**A3 — append-only/replayability boundary.** `*family-events` is `Depot.hashBy("familyId")`
+(`FamilySchemaModule.java:110`); every downstream PState in this module is written by exactly
+one deterministic stream topology off that depot (`FamilySchemaModule.java:218` onward) — no
+PState here is ever written from anywhere else. Entity IDs use `UUID.nameUUIDFromBytes`
+specifically to preserve that determinism (2026-07-15 entry above, verified against
+`redplanetlabs.com/docs/~/operating-rama.html`, "Task scaling"). No existing PState in this
+codebase has ever modeled state that changes independent of the depot's own content —
+`$$leverage-map`/`$$weakness-map` are config, written once per config record, never mutated
+in place by a later, separate action. A commitment's `status` transitioning from `open` to
+`done` on a user action, with no corresponding depot-derived signal, has no precedent here.
+Genuine architectural fork, not a formality.
+
+**A4 — additivity precedent.** Confirmed by grep that the 2026-07-15 graph-schema addition
+touched zero existing PState declarations and zero `QueryModule.java`/`DigestModule.java`
+lines — both modules fetch PStates by hardcoded name, never by iteration, so new PStates are
+invisible to old consumers by construction. This is the bar any `$$commitments` addition must
+also clear.
+
+**A5 — Brain Dump.** Zero repo trace beyond its mention in the 2026-07-15 entry as a
+"confirmed second stream." No ingestion module, depot, or schema exists for it. Per the
+brief's own lean (confirmed on approval, "everything else as written"), it stays out of scope
+this session — the commitments schema must not hard-code an email-shaped source assumption,
+the same source-neutrality check already applied to `relations` in the prior session.
+
+### Amendment 2 — resolving ordering, not just mutation (verify-at-source)
+
+Chat-o-rama status not re-checked this session; went straight to `redplanetlabs.com/docs`
+per this project's established fallback order, since it resolved the last two API questions
+(2026-07-03, 2026-07-15) without needing the chat product.
+
+**Within one depot partition, order is guaranteed.** `redplanetlabs.com/docs/~/depots.html`:
+"By using a depot partitioner to ensure any individual user's ... data goes to the same depot
+partition, local ordering is maintained and ETLs can process that data in the correct order."
+And the converse, stated explicitly: "If you were to use `Depot.random()` for that depot,
+then they could be processed out of order since data on different partitions are processed in
+parallel and independently."
+
+**Across two different depots, there is no ordering guarantee at all.**
+`redplanetlabs.com/docs/~/tutorial6.html` (the social-network tutorial) hits this exact
+shape — a `FriendRequest`/`CancelFriendRequest` pair, structurally identical to a
+commitment-created/commitment-status-changed pair. Direct quote: "This is necessary so that
+different types of data that affect the same PStates are processed in the order in which
+they happened... If those were kept on separate depots, there's no guarantee as to the order
+in which they will be processed." The tutorial's resolution is **not** a create-if-missing
+read on the consuming side — it's structural: both record types go on **one** depot
+(`Depot.hashBy(UserIdExtract.class)`, so a given user's `FriendRequest`/`CancelFriendRequest`
+always share a partition), branched inside the topology via `subSource`
+(`SubSource.create(FriendRequest.class)... Agg.set(...)`,
+`SubSource.create(CancelFriendRequest.class)... Agg.setRemove(...)`).
+
+**This resolves Amendment 2's two candidates: (a) single depot is the docs-demonstrated
+idiomatic pattern for this exact shape of problem, not a hypothetical alternative.** I did not
+find (and did not separately go looking for, since (a) already matches the reference tutorial
+precisely) a documented "create-if-missing apply" pattern (b) — Rama's own worked example
+solves the identical ordering problem structurally, via partitioning, not defensively, via
+read-before-write logic on the consumer. Recommending (a); still presenting as Fork 1 below
+since the *choice* to model commitments this way (vs. some other shape entirely) is still
+yours, even though the *mechanism*, once you choose event-sourced transitions, is now
+verified rather than assumed.
+
+**Also verified, narrowing Fork 1 further:** every PState write in this codebase (and every
+PState write demonstrated in the docs) happens inside topology processing of depot data —
+`RAMA_VERIFIED_LEARNINGS.md` documents no other write mechanism, and I found none in the
+pages fetched this session either. I did not exhaustively search for a "direct PState write"
+API outside topology context, so I'm stating this as consistent-with-everything-verified,
+not as an exhaustively-ruled-out claim — but it means Fork 1 is less "event-sourced vs. some
+unknown alternative" and more "event-sourced by construction (Rama has no other way to write
+a PState), single-depot-with-subSource vs. two-depot-with-unresolved-ordering-risk."
+
+### Amendment 1 — deterministic commitment IDs (hard requirement, stated explicitly)
+
+A commitment's ID must be derived deterministically from its source edge's stable fields —
+same discipline as `mintEntityId` (`FamilySchemaModule.java`, 2026-07-15 session):
+`commitmentId = hash(sourceEventId | "ACTION_NEEDED" | objectId)` via
+`UUID.nameUUIDFromBytes`, never `UUID.randomUUID()`. This is not optional polish — the
+event-sourced replay argument above only holds if redraining `*family-events` (which
+regenerates the `ACTION_NEEDED` edge and therefore must regenerate the *same* seed record)
+produces the identical `commitmentId` every time. A random ID would silently break replay:
+every redrain would mint a new commitment for the same underlying edge, duplicating rather
+than reconciling. Naming this as a requirement rather than leaving it implied, per the
+approved amendment.
+
+### Proposed `$$commitments` schema + write-path sketch (gated on Fork 1 confirmation)
+
+Proposal only — not implemented, not locked, contingent on you confirming Fork 1's mechanism.
+
+- **New depot:** `*commitment-events`, `Depot.hashBy("commitmentId")` — mirrors the
+  `FriendRequest`/`CancelFriendRequest` partitioner exactly, substituting `commitmentId` for
+  `userId` as the co-partitioning key so a given commitment's creation and every subsequent
+  status change land on the same partition, in the order they happened.
+- **Two record types on that depot, branched via `subSource`** (unverified call signature
+  for this codebase — `subSource` has zero prior usage here; flagging as an open item to
+  confirm against the jar before implementation, not guessing the shape):
+  - `CommitmentSeeded { commitmentId, familyId, sourceEventId, objectId, createdAt, status }`
+    — `commitmentId` computed via the deterministic hash above, `status` set to the initial
+    value from whatever vocabulary Fork 2 settles on.
+  - `CommitmentStatusChanged { commitmentId, familyId, newStatus, actor, changedAt }`.
+- **`$$commitments` PState:** `familyId -> commitmentId -> {status, createdAt, updatedAt,
+  sourceEventId, objectId}` — same direct key-path + `termVal` shape already proven at
+  `$$family-data` (`FamilySchemaModule.java:223-224`) and `$$entities`
+  (`FamilySchemaModule.java:284-285`). `CommitmentSeeded` writes the initial record;
+  `CommitmentStatusChanged` overwrites `status`/`updatedAt` only, via a narrower
+  `Path.key(...).key(...).key("status").termVal(...)`-style write (exact multi-field-update
+  Path shape not yet verified against the jar — another open item, not a guess).
+- **`$$commitments-by-status` index:** `familyId -> status -> Set<commitmentId>`, same shape
+  as `$$events-by-intent`/`$$entities-by-type` — this is the concrete mechanism behind "enough
+  for a future proactive loop to scan for gaps/overdue" (a `sortedMapRange`-style or
+  bucket-lookup query the Layer 3 scanner can use directly, no full-table scan). Moving a
+  commitmentId between status buckets on a transition requires reading the current status
+  before writing the new bucket (to remove it from the old one) — a read-then-write inside the
+  same topology pass, which I have not verified the exact API shape for in this codebase
+  (every existing index write here is a pure append into a `Set`, never a move-between-buckets
+  update). Flagging as an open item to verify before implementation, same posture as every
+  other "don't guess an API" item in this file.
+
+### Fork 1 — replayability mechanism (yours to confirm, now evidence-backed)
+
+Recommending: single depot (`*commitment-events`), `subSource`-branched, per the verified
+`FriendRequest`/`CancelFriendRequest` pattern above. This is the only mechanism found in the
+docs that solves the creation-before-transition ordering problem structurally rather than
+defensively. Confirm to lock, or tell me what's wrong with applying that pattern here.
+
+### Fork 2 — lifecycle-state vocabulary (product decision, yours)
+
+Proposing four states, open for your edit: `OPEN → IN_PROGRESS → DONE`, plus `DISMISSED` as a
+distinct terminal state from `DONE` (not-applicable / no-longer-relevant, vs. actually
+completed — these have different meaning for a future "what's overdue" scan, so collapsing
+them would lose information). Unlike `silo`/`intent`/`relation`, this vocabulary is not
+LLM-classified — it's set deterministically (`OPEN` on creation) and changed only by explicit
+action — so no `UNKNOWN` bucket is needed here, unlike those three enums.
+
+### Fork 3 — `ACTION_NEEDED` edge vs. scalar `intent=ACTION_REQUIRED` (due this session, yours)
+
+Recommending: **coexist, independently enforced, commitments seed only from edges.**
+`intent` stays exactly as it is today (an event-level SOFT search dimension, untouched,
+zero risk to `QueryModule.java`'s existing wiring). `ACTION_NEEDED` edges are the sole seed
+signal for `$$commitments`, because only the edge carries the structured target (`objectId` —
+who/what the action concerns) that a commitment record needs; the scalar `intent` field has
+no target, only a coarse event-level flag. I'm not proposing to make the parser guarantee
+edge-when-intent-is-ACTION_REQUIRED (that's a prompt change in `EmailParsingModule`, out of
+scope this session, and risks conflating a coarse classifier signal with a structured relation
+the LLM extracts separately and possibly inconsistently) — flagging as a real future
+tightening opportunity, not doing it now.
+
+### Fork 4 — seeding mechanism (yours)
+
+Recommending: **auto-create**, mechanically, in the same topology branch that already writes
+`$$edges-forward`/`$$edges-inverse` for an `ACTION_NEEDED` triple — zero LLM involvement, zero
+new human-review step, matches the deterministic/additive posture of everything built so far.
+A promotion/review gate (alternative option) would make commitment creation depend on
+asynchronous human review timing rather than deterministic redrain timing, and starts to look
+like Layer 3 UI surface rather than Layer 2 state. If review-before-acting-on-a-commitment is
+wanted, `DISMISSED` (Fork 2) already gives a lightweight way to reject a bad auto-created
+commitment after the fact, without needing a separate pre-creation gate.
+
+### Fork 5 — commitment identity (reframed per Amendment 3: confirmation, not an open call)
+
+This is the entity-resolution deferral wearing a disguise, not a new decision. Per Amendment
+1's deterministic-ID rule, two different `ACTION_NEEDED` edges — even ones a human would
+recognize as "the same real-world commitment" — always mint two different `commitmentId`s,
+because the hash includes `sourceEventId`. This is the identical shape as the 2026-07-15
+entity-resolution deferral ("the same object+type mentioned in two different events still
+mints different entityIds until a future resolution effort merges them"). Presenting this as
+confirming the standing decision (allow duplicates now, resolve later only if real volume
+demands it) — not reopening entity resolution, not solving it here.
+
+### Additive / replayable / no-scope-leak checklist
+
+- **Additive:** one new depot (`*commitment-events`), two-to-three new PStates
+  (`$$commitments`, `$$commitments-by-status`); zero edits to any existing PState declaration;
+  zero edits to `QueryModule.java`/`DigestModule.java` this session (read-wiring, if wanted,
+  is a separate future decision — not assumed in scope here, flagging explicitly rather than
+  silently including or silently excluding it).
+- **Replayable:** commitment IDs deterministic (Amendment 1); creation-before-transition
+  ordering guaranteed structurally by single-depot partitioning (Amendment 2), matching the
+  verified `FriendRequest`/`CancelFriendRequest` reference pattern, not a defensive
+  create-if-missing check.
+- **No scope leak:** no Layer 3 scanning agent, no entity resolution, no Brain Dump wiring
+  (A5, confirmed out per your approval), no parser-prompt changes to `EmailParsingModule`
+  (Fork 3's tightening opportunity deliberately not taken).
+
+### Open items carried forward, not blocking a fork decision but blocking implementation
+
+`subSource`'s exact call shape (zero prior usage in this codebase); the exact Path syntax for
+a partial-field PState update (every existing write here is either a whole-record `termVal` or
+a `Set`-append, never a move-between-index-buckets update, which `$$commitments-by-status`
+needs on every transition) — both need jar-level verification before any code is written,
+per this project's standing "never guess an API" rule.
+
+Stopping here. No code, no topology implementation this session — waiting for your decisions
+on Forks 1–4 (Fork 5 stands as confirmed) before scoping an implementation session.
+
+## 2026-07-16 — Layer 2: Fork 1 correction — creation/status-change asymmetry
+
+User caught a real defect in the recommended Fork 1 mechanism before locking it: the
+`FriendRequest`/`CancelFriendRequest` reference pattern I verified last entry assumes both
+record types are **symmetric user actions** — both permanent, both must be ordered against
+each other. `CommitmentSeeded` and `CommitmentStatusChanged` are not symmetric:
+`CommitmentStatusChanged` is a genuine user action, not regenerable from email — matches the
+reference pattern. `CommitmentSeeded` is *derived*, regenerated identically on every redrain
+of `*family-events` — it does not need to be a permanent record at all, and treating it as one
+creates the exact failure this layer exists to prevent: a redrain re-appends a fresh
+`CommitmentSeeded` that can land, in a single shared depot/partition, after an existing
+`StatusChanged`, re-materializing the commitment at its initial status and silently erasing a
+`DONE`. I had reused the reference pattern's shape (both sides permanent, same depot,
+ordering-by-partitioning) without checking whether both sides in *this* problem actually
+carry the same permanence requirement — they don't. Correcting rather than patching around it.
+
+### Corrected mechanism (recompute + create-if-missing merge, not co-partitioned ordering)
+
+**Creation is not a depot record.** It's recomputed, every redrain, in the same
+`FamilySchemaModule` stream-topology branch that already writes `$$edges-forward`/
+`$$edges-inverse` for an `ACTION_NEEDED` triple (`FamilySchemaModule.java:273-282`). For each
+`ACTION_NEEDED` edge processed: `localSelect` the current `$$commitments` record at
+`(familyId, commitmentId)` (deterministic ID per Amendment 1). If absent, write the full
+initial record (`sourceEventId`, `objectId`, `createdAt`, `status = OPEN`) and add it to the
+`OPEN` bucket of `$$commitments-by-status`. If present, at most refresh the identity fields
+(idempotent — same deterministic values every redrain) and **never touch `status` or its
+index bucket**. This is what makes redraining safe: the derived side is naturally idempotent
+and explicitly forbidden from clobbering the user-driven side.
+
+**Status changes are the only permanent record.** New depot,
+`*commitment-status-changes` (`Depot.hashBy("commitmentId")`), holding only
+`{commitmentId, familyId, newStatus, actor, changedAt}` — small, dedicated, genuinely
+append-only because every record in it really did happen once, at a real point in time, and
+must never be regenerated or replayed differently. A second stream-topology branch (same
+module, per the "index PStates live with their primary PState" convention already established)
+processes it: `localSelect` the current record; if **absent** (a status change arrived before
+the creation branch ever materialized this commitment — e.g. first-run ordering, or a status
+change referencing a commitment whose source edge a later parser change removed), create a
+stub record with whatever identity fields the event itself carries (`commitmentId`,
+`familyId`) and `sourceEventId`/`objectId` left absent until/unless the creation branch later
+fills them in — flagging this as a known, accepted gap (an "orphaned" status change with a
+temporarily-incomplete identity), not a silently swept-under-the-rug case. If **present**,
+read the old `status` (needed to remove the commitment from its old `$$commitments-by-status`
+bucket before adding it to the new one), then write the new `status`/`updatedAt`.
+
+**Why this is genuinely order-independent, not just re-labeled ordering.** Both branches use
+the identical shape of rule — "create the base record if it doesn't exist, but never
+overwrite what the other side owns" (creation never touches `status`; status-changes never
+overwrite `sourceEventId`/`objectId` once the creation branch has filled them in, only add
+them if genuinely absent). Since it doesn't depend on which branch runs first, it doesn't need
+co-partitioning across two depots to establish an order — it only needs each branch to be
+correct on its own, which is a strictly weaker and safer requirement than "hope the two
+depots' events interleave correctly."
+
+### Whether this is covered by the previously-flagged open items — no, adding a new one
+
+The two open items from the prior entry (`subSource`'s call shape; a generic "partial-field
+update" Path syntax) were written under the now-superseded single-depot/`subSource` model and
+don't quite name the actual mechanism this corrected design depends on. **Retiring** the
+`subSource` item — it's not needed under this design, since we're deliberately using two
+independent depot-fed branches rather than one `subSource`-branched depot. **Replacing** the
+generic "partial-field update" item with the precise mechanism now in play: a `localSelect`
+read of the current `$$commitments` record, followed by a conditional write (different Path
+writes depending on whether the read returned a value), inside one topology event.
+
+Verified the *concept* is sound, via `redplanetlabs.com/docs/~/pstates.html`: `localSelect`
+"queries the PState partition located on the current task" and "is a synchronous call —
+nothing else can happen on a task while a `localSelect` is running, meaning no other PStates
+on that task can change." Cross-referenced against the general execution model (same docs,
+prior fetch): "An individual event could do an arbitrary number of reads and writes to PStates
+on its task. The event doing the writing will be able to read its writes immediately... it's
+impossible for subsequent events to ever see intermediate states." Together these confirm
+read-then-conditional-write within one event is atomic with respect to every other event on
+that task/partition — the concept this corrected design needs is real, not assumed.
+
+**Still open, not yet verified, before implementation:** the exact Java call shape for
+`localSelect` and for branching a `Block` chain on its result (this codebase has zero prior
+usage of `localSelect` — every existing read in `FamilySchemaModule.java`'s write path is a
+`.select(...)` pulling a field off the incoming `*record`/`*triple`, never a PState read
+mid-topology) and the exact Path syntax for writing only `status`+`updatedAt` on an existing
+record without re-writing the whole map (vs. the current codebase's only two write shapes:
+whole-record `termVal` and `Set`-append via `nullToSet().voidSetElem()`). Both need jar-level
+(`javap` against the pinned `rama-1.5.0.jar`) or doc confirmation before any code is written —
+per this project's standing rule, not guessed at here.
+
+### Fork 1 — re-presented, corrected
+
+**Recommending:** recompute-on-redrain for creation (no depot record) + one small permanent
+depot for status changes only + create-if-missing merge logic on both branches, as described
+above. This replaces the previously recommended single-shared-depot/`subSource` mechanism,
+which was borrowed from a reference pattern that doesn't actually fit this problem's
+creation/status-change asymmetry. Awaiting your lock.
+
+### Fork 2 — `WAITING` state added, confirmed clean fit
+
+Since the lifecycle vocabulary is a closed set of values (not a strict, enforced state
+machine — same posture as `silo`/`intent`/`relation`, no transition-graph rules coded
+anywhere), adding a fifth value doesn't touch the mechanism at all: `$$commitments-by-status`
+just gains one more bucket. Vocabulary becomes: `OPEN, IN_PROGRESS, WAITING, DONE, DISMISSED`.
+`WAITING` (over `BLOCKED`) is my naming suggestion — it reads slightly more specifically as
+"waiting on an external party," matching your "waiting on the school to reply" example, versus
+`BLOCKED`'s more generic "something is obstructing this" connotation — but this is a naming
+preference only, not a structural one; either name fits the model equally cleanly. Ready to
+lock once you pick the name (or confirm `WAITING`).
+
+### Fork 4 — approved, conditional on Fork 1's stub rule, now satisfied
+
+The corrected Fork 1 mechanism includes exactly the stub rule this approval was conditioned
+on: a `StatusChanged` record for a not-yet-materialized (or, per your "dropped edge on a
+future parse change" scenario, no-longer-materializable) commitment still gets applied,
+against a stub record, rather than being silently lost. Auto-create + the stub rule = both in
+the corrected design. Fork 4 locks alongside Fork 1.
+
+### Forks 3 and 5 — unchanged, restated as locked
+
+Fork 3: `ACTION_NEEDED` edges are the sole seed signal; `intent`/`$$events-by-intent` stays an
+untouched, independent search dimension. Fork 5: deterministic per-edge commitment IDs mean
+duplicates are allowed by design when two edges describe the same real-world thing — the
+entity-resolution deferral's shape, confirmed, not reopened.
+
+Stopping here again — no code. Waiting on Fork 1 (mechanism) and Fork 2 (state name) locks;
+Fork 4 is settled contingent on Fork 1.
+
+## 2026-07-16 — Layer 2: `localSelect` read-then-conditional-write mechanism verified (jar + minimal test)
+
+New session. Task: verify the corrected Fork 1 mechanism's two remaining open items
+(`localSelect`'s exact call shape; the partial-field-update Path syntax) against the pinned
+jars and a minimal `InProcessCluster` test, before writing any `$$commitments` code. Per
+explicit instruction, the probe lived entirely outside the module —
+`/private/tmp/.../scratchpad/ProbeModule.java` + `ProbeMain.java` (plain `main()`, no
+JUnit), compiled/run directly against a `mvn dependency:build-classpath` classpath, never
+under `src/test/java`. Deleted after this entry was written, per the same instruction.
+
+### `javap` findings against the pinned `rama-1.5.0.jar`
+
+`com.rpl.rama.Block$Impl`:
+```
+public abstract com.rpl.rama.Block$OutImpl localSelect(java.lang.String, com.rpl.rama.Path);
+public abstract com.rpl.rama.Block$Impl localTransform(java.lang.String, com.rpl.rama.Path);
+public abstract com.rpl.rama.Block$Impl ifTrue(java.lang.Object, com.rpl.rama.Block);
+public abstract com.rpl.rama.Block$Impl ifTrue(java.lang.Object, com.rpl.rama.Block, com.rpl.rama.Block);
+```
+`localSelect(String pstateName, Path)` is the read half — same `Block$OutImpl` shape as
+`.select(Object, Path)`, chained with `.out("*varName")` exactly like every existing
+`.select(...)` call in `FamilySchemaModule.java`. The **3-arg** `ifTrue(Object, Block, Block)`
+overload (never used anywhere in this codebase today — every existing `.ifTrue(...)` call is
+2-arg, e.g. `FamilySchemaModule.java:227`) is the genuine if/else branch this design needs:
+predicate first, then-branch second, else-branch third. `Path.ifPath(Path, Path[, Path])`
+also exists as an alternative single-Path branching mechanism but wasn't needed once the
+`localSelect` + 3-arg `ifTrue` shape was confirmed to work end-to-end — not pursued further.
+
+### A real, previously-unverified failure mode this probe caught
+
+First probe attempt built the CREATE branch's record as one `java.util.HashMap` (via a
+`Block.each` helper method) and wrote it with a single whole-value
+`Path.key("*id").termVal("*initialRecord")` — mirroring how `$$family-data`/`$$entities`
+write whole records today. That part worked. But the UPDATE branch's **partial**-field write
+(`Path.key("*id").key("status").termVal("*requestedStatus")`, navigating *into* the
+already-stored value to overwrite only one key) threw at runtime:
+```
+java.lang.ClassCastException: class java.util.HashMap cannot be cast to class
+clojure.lang.Associative
+	at com.rpl.ramaspecter.keypath_termvalRichNav.transform_STAR_(ramaspecter.cljc:5367)
+```
+Root cause: every existing PState write in this codebase either replaces a whole leaf value
+(`termVal` at the final path segment, never read back and re-navigated by a *later, separate*
+write) or appends into a `Set` (`nullToSet().voidSetElem()`) — no existing code ever stores a
+raw Java `HashMap` as a schema-declared nested-map *level* and then, in a later depot event,
+navigates one key deeper into that same stored value. Rama's Specter-based path engine
+(`ramaspecter`) needs the container at that level to be `clojure.lang.Associative` (a Clojure
+persistent map) to `assoc` a single key into it — a plain `java.util.HashMap` instance,
+however schema-declared as `Object`, doesn't satisfy that once it's the thing already sitting
+in the PState. This is exactly the "unproven partial-field-update Path syntax" the prior
+session's REASONING.md entry flagged as an open item — now it's not just unproven, it's a
+confirmed failure mode with a confirmed fix, not a guess:
+
+**Fix: build the nested map key-by-key through the declared schema, never `termVal` a raw
+Java `Map` as a stand-in for a schema-managed level you intend to path into again later.**
+CREATE branch became two sequential `.localTransform(...)` calls (one per field) instead of
+one whole-map `termVal`; UPDATE branch's single-field write was already doing this correctly.
+Once both branches build the map through individual key-level writes, Rama's own internal
+representation at that level is native/Associative-compatible, and the later partial-key
+write succeeds. **This is the concrete implication for `$$commitments`**: the `CommitmentSeeded`
+creation write must write `sourceEventId`/`objectId`/`createdAt`/`status` as separate
+sequential `.localTransform()` calls (or otherwise avoid a whole-map `termVal`), not as one
+assembled `Map` object passed to a single `termVal` — otherwise the later
+`CommitmentStatusChanged` partial `status`/`updatedAt` write will hit this identical
+`ClassCastException`.
+
+### Probe results — both halves green, the "did not clobber" assertion explicit
+
+Ran in `InProcessCluster`, `ProbeModule` (`$$probe`: `id -> {content, status}`,
+`*probe-events` depot hashed by `id`):
+
+```
+After create: {"content" "v1", "status" "OPEN"}
+PASS: record exists after first append (localSelect-absent -> CREATE branch fired)
+PASS: content == v1 after create
+PASS: status == OPEN after create
+After update: {"content" "v1", "status" "DONE"}
+PASS: record still exists after second append
+PASS: status == DONE after update (partial write applied)
+PASS: *** content STILL == v1, NOT clobbered to v2-should-be-ignored *** (proves localSelect
+read the existing record and the ifTrue branch wrote ONLY Path.key("*id").key("status"),
+never touching "content")
+c2 (independent id): {"content" "fresh", "status" "OPEN"}
+PASS: c2 record exists (localSelect is per-key, not a whole-PState presence check)
+PASS: c2 content == fresh
+PASS: c2 status == OPEN
+PASS: c1 unaffected by c2's independent append
+
+ALL PROBE ASSERTIONS PASSED
+```
+
+Second append deliberately sent `content = "v2-should-be-ignored"` alongside the status
+change — the assertion that matters, per the task's explicit ask, is that `content` reads
+back as `"v1"` afterward, not `"v2-should-be-ignored"`. It does. This is the literal Fork 1
+guarantee (status write-once via a targeted partial write, everything else refreshed/untouched)
+proven against the real jar, not inferred from the docs' prose about `localSelect`'s
+atomicity (which was already verified conceptually last session, per the 2026-07-16 Fork-1-
+correction entry's citation of `redplanetlabs.com/docs/~/pstates.html`).
+
+### Open items retired
+
+Both remaining open items from the Fork-1-correction entry are now resolved:
+`localSelect`'s call shape (`Block$Impl.localSelect(String, Path)` → `.out(...)`, confirmed
+by `javap` and by a green run) and the partial-field-update Path syntax (confirmed working,
+with the important caveat above about never `termVal`-ing a raw `Map` into a level you'll
+later path into). `subSource` was already retired last session (superseded design).
+
+### Stopping here, per instructions
+
+No `$$commitments` PState, no `*commitment-status-changes` depot, no `FamilySchemaModule.java`
+edit this session. Probe files deleted from scratchpad now that the call shape is captured
+here with citations. Next session can proceed straight to the commitments write-path — Forks
+1 (now mechanism-verified twice over: conceptually via docs, concretely via jar+test) and 4
+are settled; Fork 2's state-name pick (`WAITING` vs. an alternative) is the only remaining
+lock needed before implementation.
+
+## 2026-07-16 — Layer 2: Commitments write-path implementation
+
+New session. Audited `CLAUDE_HANDOFF.md`, this file, and `RAMA_VERIFIED_LEARNINGS.md` in full
+before writing anything, per the task's explicit audit-first instruction. Plan approved at
+`/Users/toddkeelingfolder/.claude/plans/layer2-commitments-writepath.md`, with one scope call
+confirmed by the user: dropping `$$commitments-by-status` this session (Layer 3 scanning
+infrastructure, rebuildable later) — this also removed the only reason the status-change
+branch needed `localSelect` (reading the old status to move it between index buckets), so
+that branch ended up as a plain unconditional partial write, relying on Rama's existing
+auto-vivify behavior for the "create a stub if absent" case instead of explicit branching
+logic.
+
+### Implementation
+
+`FamilySchemaModule.java`: added `mintCommitmentId` (3-arg, `hash(sourceEventId|relation|
+objectId)`, same `nameUUIDFromBytes` discipline as `mintEntityId`), `isActionNeeded`, and
+`isAbsent` as static helpers. Declared `$$commitments` (`familyId -> commitmentId ->
+{sourceEventId, objectId, createdAt, status, updatedAt}`) and the new
+`*commitment-status-changes` depot (`Depot.hashBy("familyId")`, matching every other depot in
+this module — never random).
+
+**Creation branch** — inserted inside the existing `relations`-EXPLODE branch
+(`FamilySchemaModule.java`, same scope where `*eventId`/`*relation`/`*objectId` are already
+bound for the edges/entities writes), guarded by
+`.ifTrue(new Expr(FamilySchemaModule::isActionNeeded, "*relation"), Block...)` so
+`MENTIONS_PERSON`/`LOCATED_AT`/etc. triples skip it entirely (Fork 3). Inside that guard:
+`localSelect` reads the current `$$commitments` record **before** any write in this event
+(ordering matters — an event sees its own writes immediately, so a read-after-write would
+always see "present" and the OPEN-initialization would never fire); a 2-arg `ifTrue(isAbsent,
+...)` sets `status = OPEN` only the first time; then, unconditionally (no guard), three
+sequential `.localTransform` calls refresh `sourceEventId`/`objectId`/`createdAt` from the
+source edge every time, redrain or not. This nests one `ifTrue` inside another
+(`isActionNeeded` outer, `isAbsent` inner) — no prior example of that nesting in this
+codebase; it compiled and ran correctly on the first attempt, confirming the `Block$Impl`
+fluent API composes as expected (every op returns a further-chainable `Block$Impl`).
+
+**Status-change branch** — a second `.source("*commitment-status-changes")` chain, two
+unconditional sequential `.localTransform` writes (`status`, `updatedAt`). No `localSelect`
+needed, per the scope call above.
+
+### A real runtime failure the plan didn't anticipate, diagnosed not worked around
+
+First implementation attempt declared `$$commitments` in the existing `stream`
+(`family-events-stream`) topology but put the status-change branch on a **separate**
+`topologies.stream("commitment-status-changes-stream")` object — matching the plan's original
+`var commitmentStatusStream = topologies.stream(...)` line. Every single append to
+`*commitment-status-changes` then failed, 100% reproducible, with
+`rpl.rama.distributed.exceptions.IllegalWriteException` naming the PState's owning topology
+(`family-events-stream`) against the topology attempting the write
+(`commitment-status-changes-stream`). Per the project's highest-priority rule (diagnose the
+platform root cause, never strip down the design to make an error go away), tracked this down
+via `javap` on `RamaModule.Setup`/`Topologies` (no obvious "share this PState across
+topologies" method) and then `redplanetlabs.com/docs/~/stream.html`, which confirmed: a single
+`StreamTopology` can consume multiple depots via successive `.source(...)` calls on the SAME
+topology object, and doing so is the documented, idiomatic pattern for exactly this shape —
+"it's typical for each source block to modify the same PStates in different ways." Fixed by
+removing the separate `commitmentStatusStream` variable entirely and adding
+`*commitment-status-changes` as a second `.source(...)` branch on the existing `stream`
+variable. Full verification trail (both this finding and last session's `localSelect`/
+key-by-key-write finding) is now backfilled into `RAMA_VERIFIED_LEARNINGS.md`'s Verified
+section, not just recorded here.
+
+### Test results
+
+`CommitmentsTest.java` (6 tests, `InProcessCluster`, `@TestMethodOrder`, mirroring
+`EdgesEntityIndexTest`'s conventions): creation fires on first sight with correct content and
+`status = OPEN`; a second, independent `ACTION_NEEDED` edge mints a distinct commitmentId (no
+cross-event dedup, Fork 5); a `MENTIONS_PERSON`-only event produces zero `$$commitments`
+writes (Fork 3 scoping); a status-change event updates `status`/`updatedAt` and leaves content
+untouched; **the core guarantee — redraining the identical source `ACTION_NEEDED` event after
+a status change does NOT reset `status` back to `OPEN`**; and a status change for a
+not-yet-materialized commitment auto-vivifies a stub record (`status` set,
+`sourceEventId`/`objectId`/`createdAt` absent), with no explicit stub-handling code required.
+
+Per the user's explicit request, verified the redrain-guarantee test individually rather than
+trusting "suite green": the surefire XML report
+(`target/surefire-reports/TEST-com.family.assistant.CommitmentsTest.xml`) records
+`redrainOfSourceEdgeDoesNotClobberADoneStatus` as a bare, failure-free `<testcase>` entry
+(no `<failure>`/`<error>` child) in the full-class run. (A `-Dtest=Class#method` isolated run
+of just this test method fails, expectedly — Maven skips the earlier `@Order`ed test that sets
+`status = DONE` in the first place, so the isolated run starts from a fresh `OPEN` and the
+"still DONE" assertion has nothing to compare against; this is a test-isolation artifact of
+Maven's single-method filter on stateful ordered tests, not a defect in the commitments logic
+— confirmed by re-running the whole class, where all 6 pass together.)
+
+`mvn clean test` (full suite, non-LLM): **143/143 green** (137 existing + 6 new
+`CommitmentsTest`), `BUILD SUCCESS`, zero regressions — confirms this is additive, per the
+user's second explicit ask. `GmailIngestionTest`'s pre-existing, unrelated
+`invalid_grant`/expired-token warning appears in the log (same warning documented in
+`CLAUDE_HANDOFF.md` from earlier sessions) but does not fail the build or the test.
+
+### Known consequence, logged per instruction: the dropped-edge ghost
+
+Same risk family as the already-accepted auto-create risk (Fork 4: a bad auto-created
+commitment persists until manually `DISMISSED` — there's no pre-creation review gate). If a
+future `EmailParsingModule` change stops extracting the `ACTION_NEEDED` relation that
+originally seeded a given commitment (a corrected prompt, a schema change, or the triple
+simply stops matching), the creation branch will never process that edge again — but nothing
+in this design ever deletes a `$$commitments` record. The commitment becomes a permanent
+**ghost**: its `status` can still be changed by a real status-change event (the status-change
+branch has no dependency on the creation branch ever having run, by design — that's what makes
+the out-of-order stub case in test 6 work), but its content fields will never again be
+refreshed by a live source edge, and the record itself will never be garbage-collected. This
+is not a new problem requiring new design — it's the identical shape as the auto-create risk,
+and the identical fix already exists: `DISMISSED` is the after-the-fact escape hatch for a
+commitment that no longer reflects anything real, whether it was wrong from the start (Fork 4)
+or became stale because its source edge disappeared (this entry). No action taken this
+session — flagging for whoever eventually builds Layer 3's "what's overdue" scan, since a
+ghost with a stale `OPEN`/`IN_PROGRESS` status is exactly the kind of record such a scan would
+surface and a human would need to `DISMISS`.
+
+### Stopping here, per instructions
+
+No git commit. `CLAUDE_HANDOFF.md` PState table, event-record section, and test-suite table
+still need updating to reflect `$$commitments`/`*commitment-status-changes`/`CommitmentsTest`
+and the new 143 test count — next step, before reporting complete.

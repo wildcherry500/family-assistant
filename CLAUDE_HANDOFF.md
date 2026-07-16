@@ -15,7 +15,9 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **137/137 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+- **143/143 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+  2026-07-16 Layer 2 Commitments write-path session (+6: new `CommitmentsTest` — see
+  "Recently Completed" below). Prior to that, 137/137 as of the
   2026-07-15 graph-schema-evolution session (+11: new `EdgesEntityIndexTest` covering
   `$$edges-forward`/`$$edges-inverse`/`$$entities`/`$$entities-by-type` — see "Recently
   Completed" below). Prior to that, 126/126 as of the 2026-07-14 `SearchAgentTest`
@@ -92,6 +94,7 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | `$$entities-by-type` | `familyId -> entityType` | `Set<entityId>` | PERSON/ORG/PLACE/PROJECT/UNKNOWN. Added 2026-07-15. Makes the `UNKNOWN` bucket an inspectable indexed queue — the trigger for eventually promoting a `WORK` type (creative-work mentions currently fall to UNKNOWN) is real recurring volume showing up here, not a guess. See `REASONING.md`'s 2026-07-15 entry. |
 | `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
 | `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
+| `$$commitments` | `familyId -> commitmentId` | `{sourceEventId, objectId, createdAt, status, updatedAt}` | Layer 2 commitments. Added 2026-07-16. Seeded ONLY from `ACTION_NEEDED` edges (Fork 3) — `intent`/`$$events-by-intent` stays an untouched, independent search dimension. `commitmentId = hash(sourceEventId\|relation\|objectId)` — deterministic (`nameUUIDFromBytes`, never random), duplicates across events allowed by design (Fork 5, same shape as entity-ID non-dedup). `sourceEventId`/`objectId`/`createdAt` are content — always refreshed by the `family-events-stream` creation branch on every redrain, since they're deterministic from the source edge. `status` is write-once: initialized to `OPEN` only the first time a commitment is seen (guarded by a `localSelect`-then-`ifTrue` read that happens before any write in that event), and thereafter owned exclusively by the `*commitment-status-changes` depot's own branch (a second `.source(...)` on the SAME topology — see `RAMA_VERIFIED_LEARNINGS.md`, a PState can only be written by one topology). States: `OPEN, IN_PROGRESS, WAITING, DONE, DISMISSED` (Fork 2) — closed value set, not an enforced state machine. Auto-create, no review gate (Fork 4); `DISMISSED` is the after-the-fact undo, including for a "ghost" commitment whose source edge later stops being extracted (see `REASONING.md`'s 2026-07-16 implementation entry). No `$$commitments-by-status` index this session — deliberately deferred as Layer 3 scanning infrastructure. Not yet read by `QueryModule.java`/`DigestModule.java` — that's a later session. |
 
 ### $$events-by-date — Rama 1.5.0 API notes (verified by testing)
 
@@ -140,10 +143,11 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (137 tests, all non-LLM)
+## Test Suite (143 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
+| `CommitmentsTest` | 6 | `$$commitments` write-path — creation fires on first sight from an `ACTION_NEEDED` edge with correct content + initial `OPEN` status; independent edges mint distinct commitmentIds (no cross-event dedup); a non-`ACTION_NEEDED` relation seeds nothing (Fork 3 scoping); a status-change event updates `status`/`updatedAt` and leaves content untouched; **redraining the identical source edge after a status change does NOT reset `status` back to `OPEN`** (the core Fork 1 guarantee, verified individually via the surefire XML report, not just suite-green); a status change for a not-yet-materialized commitment auto-vivifies a stub record. Added 2026-07-16. |
 | `EdgesEntityIndexTest` | 11 | `$$edges-forward`/`$$edges-inverse`/`$$entities`/`$$entities-by-type` — forward+inverse edge materialization (paired: inverse assertions use the exact objectId extracted from the forward set, a genuine cross-direction consistency check, not two decoupled existence checks), entity-ID collapse within one event (two relations, same object+type → one entity row), cross-event distinctness (no dedup), `$$entities-by-type` inspectability for PERSON/PLACE **and the UNKNOWN bucket specifically** (a genuinely-unrecognized mention resolves back to its raw `canonicalName` via the index — the exact mechanism the `WORK`-type deferral depends on), no-op on an absent `relations` field, and idempotency under a simulated redrain (re-append the identical record, assert no new entities/no set growth, same entityId re-derived). Added 2026-07-15. |
 | `MultiValueIndexTest` | 8 | Multi-element `tags`/`personId` fan-out completeness, tag/person branch isolation (no field bleed), keyword-branch coexistence under `anchor`/`hook`, and classifier-field `null` round-trip. Added 2026-07-05. |
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
@@ -359,6 +363,39 @@ code touched. Fully backward compatible — every pre-existing record (none of w
 absent `tags`/`personId` list. **137/137 non-LLM tests green** (was 126/126), zero
 regressions — new `EdgesEntityIndexTest` (11 tests) exercises the new branch directly,
 since no pre-existing fixture ever populated `relations`.
+
+## Recently Completed (2026-07-16) — Layer 2 Commitments write-path
+
+Design-then-implement, two sessions (localSelect/`ifTrue` mechanism verified via jar + a
+throwaway probe first; the write-path itself second). Locked design: commitments seed ONLY
+from `ACTION_NEEDED` edges (Fork 3); creation is recomputed every `*family-events` redrain,
+not a depot record (content fields always refreshed, deterministic); `status` is write-once,
+owned exclusively by a new permanent depot/branch (`*commitment-status-changes`); commitment
+IDs deterministic (Fork 5, duplicates allowed by design); five-value closed status vocabulary
+(Fork 2); auto-create, no review gate (Fork 4). Full rationale and the corrected (recompute +
+create-if-missing, not co-partitioned `subSource`) mechanism are in `REASONING.md`'s
+2026-07-16 entries.
+
+Added `$$commitments` and `*commitment-status-changes` (`Depot.hashBy("familyId")`) to
+`FamilySchemaModule`. The creation branch lives inside the existing `relations`-EXPLODE
+branch, guarded to `ACTION_NEEDED` only; the status-change branch is a **second
+`.source(...)` call on the same `family-events-stream` topology object** — not a separate
+topology, since a PState can only be written by the one topology that declared it (a real
+`IllegalWriteException` hit and fixed this session; see `RAMA_VERIFIED_LEARNINGS.md`).
+Deliberately dropped `$$commitments-by-status` this session (Layer 3 scanning
+infrastructure, rebuildable later) — simplifies the status-change branch to a plain
+unconditional partial write, relying on Rama's auto-vivify behavior for the "arrived before
+creation" stub case instead of explicit branching.
+
+**143/143 non-LLM tests green** (was 137/137), zero regressions — new `CommitmentsTest` (6
+tests) exercises creation, cross-event distinctness, Fork-3 scoping, status-change
+application, and — verified individually via the surefire XML report per explicit request,
+not just suite-green — **the core guarantee: redraining the source `ACTION_NEEDED` edge
+after a status change does not reset `status` back to `OPEN`**. Not yet read by
+`QueryModule.java`/`DigestModule.java` — consuming commitments is a later session. A known,
+accepted consequence is logged in `REASONING.md`: a commitment whose source edge is later
+removed by a parser change becomes a permanent "ghost" (same risk family as the already-
+accepted auto-create risk; `DISMISSED` is the same fix for both).
 
 ## Next Task
 

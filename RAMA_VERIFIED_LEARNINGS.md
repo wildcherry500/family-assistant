@@ -179,6 +179,81 @@ method name and same one-arg same-module semantics as the decompiled interface. 
 exercised by a passing test in this repo; first real use is the planned `search-agent`
 (inside `QueryModule`) being invoked from `query-agent`'s fetch-data node.
 
+### `localSelect`/3-arg `ifTrue` read-then-conditional-write — verified against the 1.5.0 jar and a minimal InProcessCluster probe
+Verified 2026-07-16 (Layer 2 Commitments, Fork 1 mechanism session) by decompiling
+`com.rpl.rama.Block$Impl` with `javap`:
+```java
+public abstract Block$OutImpl localSelect(String pstateName, Path path);
+public abstract Block$Impl ifTrue(Object predicate, Block thenBranch);
+public abstract Block$Impl ifTrue(Object predicate, Block thenBranch, Block elseBranch);
+```
+`localSelect(String, Path)` is the read half — same `Block$OutImpl` shape as `.select(Object,
+Path)`, chained with `.out("*var")` exactly like every existing `.select(...)` call in this
+codebase. On a never-seen key it binds `null`; on an existing key it binds the current value
+— confirmed empirically (not just from the signature) with a throwaway probe module outside
+`src/`, deleted after this entry was written. The 3-arg `ifTrue(Object, Block, Block)`
+overload (unused anywhere in this codebase before this session — every prior `.ifTrue(...)`
+call is 2-arg) is the genuine if/else branch.
+
+**Real failure mode the probe caught, with a confirmed fix:** building a record as one
+assembled `java.util.HashMap` and writing it with a single whole-value
+`Path.key(...).termVal(wholeMapObject)` works for the first write, but a **later, separate**
+write that navigates one key deeper into that same stored value (e.g.
+`Path.key(...).key("status").termVal(...)`) throws at runtime:
+```
+java.lang.ClassCastException: class java.util.HashMap cannot be cast to class
+clojure.lang.Associative
+	at com.rpl.ramaspecter.keypath_termvalRichNav.transform_STAR_(ramaspecter.cljc:5367)
+```
+Root cause: every existing PState write in this codebase before this session either replaces
+a whole leaf value (`termVal` at the final path segment, never re-navigated by a later,
+separate write) or appends into a `Set` — no prior code stored a raw Java `HashMap` as a
+schema-declared nested-map level and then, in a different depot event, navigated one key
+deeper into that same stored value. Rama's Specter-based path engine (`ramaspecter`) needs
+the container at that point to be `clojure.lang.Associative` (a Clojure persistent map) to
+`assoc` a single key into it — a plain `java.util.HashMap`, however schema-declared as
+`Object`, doesn't satisfy that once it's already the thing sitting in the PState.
+
+**Fix, now the standing rule for any PState value that will ever receive a later partial-field
+write:** build the nested map key-by-key through sequential `.localTransform(...)` calls (one
+per field), never `termVal` one assembled `Map` object as a stand-in for a schema-managed
+level you intend to path into again later. Applied in `FamilySchemaModule`'s `$$commitments`
+creation branch: `sourceEventId`/`objectId`/`createdAt`/`status` are each written by their own
+`.localTransform(...)` call, which is exactly what makes the later, separate
+`status`/`updatedAt` partial write (from the `*commitment-status-changes` branch) succeed
+without clobbering the rest of the record. `$$entities`/`$$leverage-map`/`$$weakness-map`
+still use whole-map `termVal` safely, because nothing ever partially updates them afterward —
+this constraint only bites when a PState value is BOTH built as one assembled `Map` AND later
+targeted by a different, narrower write.
+
+### A PState can only be written by the ONE topology that declared it — multiple depots must share ONE topology via successive `.source(...)` calls
+Verified 2026-07-16 (Layer 2 Commitments implementation session) the hard way first, then
+confirmed against the docs. First attempt declared `$$commitments` in the existing
+`family-events-stream` (`stream.pstate("$$commitments", ...)`) but consumed
+`*commitment-status-changes` from a **separate** `topologies.stream(...)` object
+(`commitment-status-changes-stream`) — every single append to that depot then failed at
+runtime, 100% reproducible, with:
+```
+rpl.rama.distributed.exceptions.IllegalWriteException
+[$$commitments, module FamilySchemaModule,
+ :topology-id :family-events-stream, :curr-topology-id :commitment-status-changes-stream]
+```
+The exception's own payload names the PState's owning topology (`:topology-id`) versus the
+topology that attempted the illegal write (`:curr-topology-id`) — a PState is scoped to
+exactly one topology for writes, regardless of which topology declared it or how similar the
+schemas are. Confirmed via `redplanetlabs.com/docs/~/stream.html`: a single `StreamTopology`
+object can consume from **multiple depots** via successive `.source(...)` calls, and doing so
+is the documented pattern for exactly this shape of problem — *"When consuming multiple
+depots from a topology, it's typical for each source block to modify the same PStates in
+different ways."* No partitioning-match requirement between the two depots is documented or
+needed. **Fix:** `*commitment-status-changes` is consumed as a second `.source(...)` branch on
+the SAME `stream` topology variable that declared `$$commitments` (`family-events-stream`),
+not a separate topology object — every other PState in this module that's written from more
+than one logical source (`$$leverage-map`/`$$weakness-map`, both routed by a `mapType`
+discriminator) already followed this rule by accident, since they were always single-source
+per topology; `$$commitments` is the first PState in this codebase genuinely fed by two
+different depots, and is the first place this constraint became visible.
+
 ---
 
 ## Unverified — do not use without confirming

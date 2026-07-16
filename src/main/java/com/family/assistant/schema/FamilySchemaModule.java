@@ -100,6 +100,29 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         return entity;
     }
 
+    /** Layer 2 commitments seed from ACTION_NEEDED edges only (Fork 3) — intent stays untouched. */
+    private static boolean isActionNeeded(String relation) {
+        return "ACTION_NEEDED".equals(relation);
+    }
+
+    /** True when a localSelect read found nothing at that PState path. */
+    private static boolean isAbsent(Object existing) {
+        return existing == null;
+    }
+
+    /**
+     * Deterministic per-edge commitment ID: hash(sourceEventId|relation|objectId), same
+     * nameUUIDFromBytes discipline as mintEntityId — redraining *family-events* must
+     * regenerate the identical ID for the identical ACTION_NEEDED edge, or every redrain
+     * would mint a duplicate commitment instead of reconciling with the existing one.
+     * Two different edges describing the same real-world commitment still mint different
+     * IDs (Fork 5) — entity-resolution-shaped, deferred, not solved here.
+     */
+    private static String mintCommitmentId(String sourceEventId, String relation, String objectId) {
+        String key = sourceEventId + "|" + relation + "|" + objectId;
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
     @Override
     public String getModuleName() {
         return "FamilySchemaModule";
@@ -114,6 +137,16 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         // be a Map carrying a "familyId" key (Chat-o-rama 2026-03-11: the hashBy(String)
         // overload looks up the key from the record, which must implement Map).
         setup.declareDepot("*raw-emails", Depot.hashBy("familyId"));
+        // Layer 2 commitments: the only permanent, append-only record in this layer — a
+        // commitment's CREATION is recomputed every redrain (not a depot record; see the
+        // ACTION_NEEDED branch below), but a status change is a real thing that happened
+        // once and must never be regenerated or replayed differently. hashBy("familyId"),
+        // never random, matching every other depot in this module (verified last session:
+        // redplanetlabs.com/docs/~/depots.html, ordering is only guaranteed within a
+        // partition — not that it's needed here, since this depot's branch never depends on
+        // *family-events'* processing order, but consistency with the rest of the module's
+        // partitioning is still the safe default).
+        setup.declareDepot("*commitment-status-changes", Depot.hashBy("familyId"));
 
         var stream = topologies.stream("family-events-stream");
         var configStream = topologies.stream("weakness-leverage-config-stream");
@@ -203,6 +236,18 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                 PState.mapSchema(String.class,
                     PState.setSchema(String.class))));
 
+        // Layer 2 commitments: familyId -> commitmentId -> {sourceEventId, objectId,
+        // createdAt, status, updatedAt}. Seeded ONLY from ACTION_NEEDED edges (Fork 3).
+        // sourceEventId/objectId/createdAt are content — always refreshed on redrain;
+        // status is write-once via a separate depot/branch (commitment-status-changes,
+        // below) — see the ACTION_NEEDED branch's comment for the localSelect-guarded
+        // write that protects it. No $$commitments-by-status index this session —
+        // that's Layer 3 scanning infrastructure, deliberately deferred.
+        stream.pstate("$$commitments",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class,
+                    PState.mapSchema(String.class, Object.class))));
+
         // Config: familyId -> entryId -> leverage entry (silo/intent -> weight)
         configStream.pstate("$$leverage-map",
             PState.mapSchema(String.class,
@@ -218,6 +263,7 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         stream.source("*family-events").out("*record")
           .select("*record", Path.key("familyId")).out("*familyId")
           .select("*record", Path.key("id")).out("*eventId")
+          .select("*record", Path.key("created")).out("*eventCreatedAt")
           .hashPartition("*familyId")
           // Write primary store
           .localTransform("$$family-data",
@@ -285,6 +331,27 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
               Path.key("*familyId").key("*objectId").termVal("*entityRecord"))
           .localTransform("$$entities-by-type",
               Path.key("*familyId").key("*objectType").nullToSet().voidSetElem().termVal("*objectId"))
+          // Layer 2 commitments: seed ONLY from ACTION_NEEDED edges (Fork 3) — MENTIONS_PERSON/
+          // LOCATED_AT/etc. triples skip this block entirely. Creation is recomputed every
+          // redrain (Fork 1): sourceEventId/objectId/createdAt are content, always refreshed;
+          // status is set to OPEN only the first time this commitment is seen, and is
+          // otherwise owned exclusively by the commitment-status-changes branch below. The
+          // localSelect READS BEFORE any write below it in this same event, so it reflects
+          // pre-event state — an event sees its own writes immediately (verified last
+          // session: redplanetlabs.com/docs/~/pstates.html), so reading after writing would
+          // always see "present" and never fire the OPEN-initialization branch.
+          .ifTrue(new Expr(FamilySchemaModule::isActionNeeded, "*relation"),
+              Block.each(FamilySchemaModule::mintCommitmentId, "*eventId", "*relation", "*objectId").out("*commitmentId")
+                   .localSelect("$$commitments", Path.key("*familyId").key("*commitmentId")).out("*existingCommitment")
+                   .ifTrue(new Expr(FamilySchemaModule::isAbsent, "*existingCommitment"),
+                       Block.localTransform("$$commitments",
+                           Path.key("*familyId").key("*commitmentId").key("status").termVal("OPEN")))
+                   .localTransform("$$commitments",
+                       Path.key("*familyId").key("*commitmentId").key("sourceEventId").termVal("*eventId"))
+                   .localTransform("$$commitments",
+                       Path.key("*familyId").key("*commitmentId").key("objectId").termVal("*objectId"))
+                   .localTransform("$$commitments",
+                       Path.key("*familyId").key("*commitmentId").key("createdAt").termVal("*eventCreatedAt")))
           .hook("fanoutRoot")
           // Tokenize title+description+emailSubject and fan out one write per token
           .macro(Block.each(EventUtils::tokenizeEvent, "*record").out("*tokens"))
@@ -316,5 +383,41 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
           .ifTrue(new Expr(FamilySchemaModule::isWeaknessMapType, "*mapType"),
               Block.localTransform("$$weakness-map",
                   Path.key("*familyId").key("*entryId").termVal("*entry")));
+
+        // Layer 2 commitments: the ONLY writer of "status"/"updatedAt" on $$commitments.
+        // Genuinely permanent records — {commitmentId, familyId, newStatus, changedAt} — a
+        // status change really happened once and must never be regenerated by a redrain
+        // (unlike the ACTION_NEEDED branch's creation logic above). No localSelect needed
+        // here: with $$commitments-by-status deliberately out of scope this session (it was
+        // the only reason the original design needed to read the OLD status — to move a
+        // commitment between index buckets), this is a plain unconditional partial write.
+        // Rama's existing auto-vivify behavior (already proven by $$family-data handling a
+        // brand-new familyId with no prior check) creates the stub {status, updatedAt} row
+        // for free if this status change arrives before the ACTION_NEEDED branch ever
+        // materializes the commitment — no explicit stub-handling code required. "actor" is
+        // durably captured in this depot's own replay log but not projected into
+        // $$commitments this session — nothing consumes it yet.
+        //
+        // This MUST be a second .source(...) branch on the SAME "stream" topology object
+        // that declared $$commitments (family-events-stream) — a PState can only be
+        // written by the topology that declared it (confirmed the hard way: an earlier
+        // attempt to declare $$commitments in "stream" but write it from a separate
+        // "commitment-status-changes-stream" topology threw
+        // IllegalWriteException{:topology-id family-events-stream,
+        // :curr-topology-id commitment-status-changes-stream} at runtime, every single
+        // append). Verified against redplanetlabs.com/docs/~/stream.html: a single
+        // StreamTopology can consume multiple depots via successive .source(...) calls,
+        // and "it's typical for each source block to modify the same PStates in different
+        // ways" — no partitioning-match requirement between the two depots.
+        stream.source("*commitment-status-changes").out("*statusChange")
+          .select("*statusChange", Path.key("familyId")).out("*familyId")
+          .select("*statusChange", Path.key("commitmentId")).out("*commitmentId")
+          .select("*statusChange", Path.key("newStatus")).out("*newStatus")
+          .select("*statusChange", Path.key("changedAt")).out("*changedAt")
+          .hashPartition("*familyId")
+          .localTransform("$$commitments",
+              Path.key("*familyId").key("*commitmentId").key("status").termVal("*newStatus"))
+          .localTransform("$$commitments",
+              Path.key("*familyId").key("*commitmentId").key("updatedAt").termVal("*changedAt"));
     }
 }
