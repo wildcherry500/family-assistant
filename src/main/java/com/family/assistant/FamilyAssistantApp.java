@@ -12,6 +12,7 @@ import com.family.assistant.webhook.WebhookReceiver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rpl.agentorama.AgentClient;
 import com.rpl.agentorama.AgentManager;
+import com.rpl.rama.Depot;
 import com.rpl.rama.Path;
 import com.rpl.rama.PState;
 import com.rpl.rama.RamaClusterManager;
@@ -19,6 +20,10 @@ import com.rpl.rama.cluster.ClusterManagerBase;
 import com.rpl.rama.test.InProcessCluster;
 import com.rpl.rama.test.LaunchConfig;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -131,14 +136,18 @@ public class FamilyAssistantApp {
         // -----------------------------------------------------------------------
         // Start webhook receiver
         // -----------------------------------------------------------------------
-        WebhookReceiver receiver = new WebhookReceiver(gmailIngestionClient, queryAgentClient);
+        String schemaModuleName = new FamilySchemaModule().getModuleName();
+        PState commitmentsPState = cluster.clusterPState(schemaModuleName, "$$commitments");
+        Depot statusChangesDepot = cluster.clusterDepot(schemaModuleName, "*commitment-status-changes");
+
+        WebhookReceiver receiver = new WebhookReceiver(
+            gmailIngestionClient, queryAgentClient, commitmentsPState, statusChangesDepot);
         receiver.start(port);
 
         // -----------------------------------------------------------------------
         // Debug endpoint: GET /debug/pstate/{familyId}
         // Returns the full $$family-data entry for the given familyId as JSON.
         // -----------------------------------------------------------------------
-        String schemaModuleName = new FamilySchemaModule().getModuleName();
         PState familyData = cluster.clusterPState(schemaModuleName, "$$family-data");
         ObjectMapper mapper = new ObjectMapper();
 
@@ -155,6 +164,45 @@ public class FamilyAssistantApp {
             Object data = familyData.selectOne(Path.key("keeling-family-001"));
             ctx.result(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data));
             ctx.contentType("application/json");
+        });
+
+        // -----------------------------------------------------------------------
+        // Debug endpoint: POST /debug/inject-test-event
+        // Appends directly to *family-events — the same depot EmailParsingModule appends
+        // to after LLM extraction (EmailParsingModule.java:374-375). Bypasses Gmail fetch
+        // and LLM classification only; everything downstream (FamilySchemaModule's real
+        // stream topology: $$family-data, $$edges-forward/inverse, $$entities,
+        // $$commitments) runs exactly as in production. Manual test-injection utility,
+        // same ad hoc pattern as the /debug/pstate routes above — not part of the
+        // reviewed webhook route surface.
+        // -----------------------------------------------------------------------
+        Depot familyEventsDepot = cluster.clusterDepot(schemaModuleName, "*family-events");
+
+        receiver.getApp().post("/debug/inject-test-event", ctx -> {
+            String familyId = "keeling-family-001";
+            String eventId = "debug-evt-" + System.currentTimeMillis();
+
+            Map<String, String> relation = new HashMap<>();
+            relation.put("relation", "ACTION_NEEDED");
+            relation.put("objectType", "PERSON");
+            relation.put("object", "Todd");
+            List<Map<String, String>> relations = new ArrayList<>();
+            relations.add(relation);
+
+            Map<String, Object> event = new HashMap<>();
+            event.put("id", eventId);
+            event.put("familyId", familyId);
+            event.put("title", "Debug injected event — sign permission slip");
+            event.put("description", "Manually injected via /debug/inject-test-event to verify the open-items/mark-done loop.");
+            event.put("tags", new ArrayList<String>());
+            event.put("personId", new ArrayList<String>());
+            event.put("relations", relations);
+            event.put("created", System.currentTimeMillis());
+            event.put("sourceType", "test");
+
+            familyEventsDepot.append(event);
+
+            ctx.json(Map.of("status", "ok", "eventId", eventId, "familyId", familyId));
         });
 
         // -----------------------------------------------------------------------

@@ -2292,3 +2292,151 @@ surface and a human would need to `DISMISS`.
 No git commit. `CLAUDE_HANDOFF.md` PState table, event-record section, and test-suite table
 still need updating to reflect `$$commitments`/`*commitment-status-changes`/`CommitmentsTest`
 and the new 143 test count — next step, before reporting complete.
+
+## 2026-07-16 — Open-items view + mark-done path: audit, decisions, and gate answers
+
+Same-day follow-on session to the Layer 2 Commitments write-path above: build the first read
+(`$$commitments` open-items view) and first real write trigger (mark-done →
+`*commitment-status-changes`), scoped small per the user's brief. Plan was written and required
+explicit approval before any code — the user gated approval on two audit confirmations, answered
+below, plus pre-approved both design decision points to "go with your recommendations."
+
+### Step 0 audit — confirmed clean, nothing to fix
+
+- **Second `.source()` wiring**: confirmed by direct file read, not by trusting
+  `CLAUDE_HANDOFF.md`'s prose. `$$commitments` is declared on the `stream` variable
+  (`family-events-stream`), and `*commitment-status-changes` is consumed via a second
+  `stream.source(...)` call on that *same* variable (`FamilySchemaModule.java:412-421`) — not a
+  separate topology object. Quoted the actual code back to the user before proceeding, per the
+  brief's "if not wired, stop and report — do not fix it silently" instruction. It was wired;
+  independently corroborated by `CommitmentsTest`'s existing 6/6 green, including the
+  redrain-doesn't-clobber-DONE test.
+- **Webhook server location**: `WebhookReceiver.java` (`com.family.assistant.webhook`), started
+  from `FamilyAssistantApp.main()`, fronted by a `cloudflared tunnel` (README.md:62-69 — pure
+  network passthrough, no cluster logic of its own). Its constructor only took `AgentClient`
+  handles before this session; the two existing debug PState routes were instead bolted directly
+  onto `receiver.getApp()` inside `FamilyAssistantApp.main()`, an ad hoc pattern this session
+  deliberately did not continue (see decision point below).
+
+### Gate answer — is $$commitments subindexed?
+
+Confirmed **not subindexed** by direct inspection of its declaration in `FamilySchemaModule.java`:
+no `.subindexed()` call, unlike `$$events-by-date` (which does have one and is the PState the
+`RocksDBWrapper`-on-`selectOne(Path.key(familyId))` gotcha in `RAMA_VERIFIED_LEARNINGS.md` applies
+to). `$$commitments` is a plain 3-level `mapSchema`, same shape as `$$entities`. Independently
+corroborated: `CommitmentsTest`'s own `commitmentIdForSourceEvent`/`commitmentRecord` helpers
+already call `selectOne(Path.key(FAMILY_ID))` directly and get a usable `Map`, not a
+`RocksDBWrapper`. So the plain `selectOne` in the open-items read is correct as originally
+planned — the `RocksDBWrapper` workaround does not apply here and was not added.
+
+### Decision points — both resolved per the user's "go with your recommendations"
+
+1. **Read location**: direct `clusterPState` read inside `WebhookReceiver`, not a `QueryModule`
+   query. Reasoning stands as proposed in the plan: `QueryModule`'s `query-agent` is LLM-backed
+   (needs `GEMINI_API_KEY`, goes through Agent-o-rama invocation) — routing a zero-LLM plain
+   scan/filter through it would add a real dependency for no benefit.
+2. **Entry point shape**: extended `WebhookReceiver`'s constructor to take `PState
+   commitmentsPState` and `Depot statusChangesDepot` (mirroring its existing `AgentClient` params)
+   rather than bolting the two new routes onto `FamilyAssistantApp.main()` the way the pre-existing
+   `/debug/pstate` routes were. This keeps routing logic together in the class that actually owns
+   it — the brief's "entry point on the existing webhook server" — and, as a direct consequence,
+   makes the route logic unit-testable: `openCommitments`/`markDone` were extracted as public
+   methods so `OpenItemsAndMarkDoneTest` calls the *exact* code the HTTP routes call, without
+   booting Javalin or making real HTTP requests. (They ended up `public`, not package-private, only
+   because this project's test convention keeps all tests in the `com.family.assistant` package
+   regardless of which subpackage the production class lives in — `CommitmentsTest` does the same
+   for `FamilySchemaModule`'s package-crossing access pattern.)
+
+### What was NOT built (flagged, not fixed)
+
+`$$commitments-by-status` index — still explicitly out of scope (Layer 3), so the open-items read
+is an O(n)-per-family scan-and-filter over the whole `$$commitments` map on every request. Flagged
+again in this session's `CLAUDE_HANDOFF.md` entry as a known future cost, not silently absorbed.
+
+### Test results
+
+New `OpenItemsAndMarkDoneTest` (1 test, `InProcessCluster`, poll-with-timeout per
+`RAMA_VERIFIED_LEARNINGS.md` — never `waitForStreamProcessedCount`): the full brief-mandated loop
+in one test — ingest an `ACTION_NEEDED` event → commitment appears in the open-items view →
+mark-done → commitment disappears from the open-items view → redrain the identical source event →
+commitment stays absent for a 3-second poll window, with the underlying record independently
+verified to still read `status = "DONE"` (not just "filtered out by some other bug").
+
+`mvn test` (full suite, non-LLM): **144/144 green** (143 existing + 1 new), `BUILD SUCCESS`, zero
+regressions. All existing pre-session warnings (`invalid_grant` in `GmailIngestionTest`, two
+non-varargs-call warnings in `IndexPStateTest`/`QueryIndexTest`) are pre-existing and unrelated,
+same as documented in earlier sessions.
+
+`CLAUDE_HANDOFF.md` updated in the same session: test count (143→144), `$$commitments` PState row
+(new consumers noted), new "Recently Completed" entry, new test-suite table row. No git commit —
+per standing project convention, commits happen only when the user explicitly asks.
+
+## 2026-07-16 — Live server smoke test: unvalidated mark-done finding, flagged for the deploy session
+
+After the plan above shipped, the user ran the actual server locally (`InProcessCluster` mode,
+`mvn compile exec:exec`) and exercised the new routes by hand — including injecting a real test
+event through `*family-events` via a temporary `/debug/inject-test-event` route (added for this
+smoke test only, same ad hoc pattern as the pre-existing `/debug/pstate` routes; see
+`FamilyAssistantApp.java`). While poking at it, the user POSTed `/commitments/{id}/done` with a
+garbage `commitmentId` that was never seeded by any real `ACTION_NEEDED` edge, and got back
+`{"status":"ok"}` — the endpoint has no existence check before appending. Asked to trace the
+consequence and log a decision, not fix it.
+
+### Traced consequence
+
+`WebhookReceiver.markDone` unconditionally appends `{familyId, commitmentId, newStatus: "DONE",
+changedAt}` to `*commitment-status-changes` regardless of whether `commitmentId` corresponds to
+anything real (`WebhookReceiver.java`, `markDone` — no `$$commitments` read before the append).
+That depot is consumed by `FamilySchemaModule`'s status-change branch
+(`FamilySchemaModule.java:412-421`, quoted below), which is a **plain unconditional partial
+write** — no `localSelect`/`ifTrue` existence guard, unlike the ACTION_NEEDED creation branch's
+OPEN-initialization check:
+
+```java
+stream.source("*commitment-status-changes").out("*statusChange")
+  .select("*statusChange", Path.key("familyId")).out("*familyId")
+  .select("*statusChange", Path.key("commitmentId")).out("*commitmentId")
+  .select("*statusChange", Path.key("newStatus")).out("*newStatus")
+  .select("*statusChange", Path.key("changedAt")).out("*changedAt")
+  .hashPartition("*familyId")
+  .localTransform("$$commitments",
+      Path.key("*familyId").key("*commitmentId").key("status").termVal("*newStatus"))
+  .localTransform("$$commitments",
+      Path.key("*familyId").key("*commitmentId").key("updatedAt").termVal("*changedAt"));
+```
+
+Rama's auto-vivify behavior (the same mechanism `CommitmentsTest`'s test 6,
+`statusChangeForNeverSeenCommitmentCreatesStub`, already exercises and asserts) creates a brand
+new `$$commitments` row keyed by the garbage `commitmentId`: `{status: "DONE", updatedAt:
+<changedAt>}`, with `sourceEventId`/`objectId`/`createdAt` permanently absent (no creation branch
+will ever populate them for an ID that doesn't correspond to a real `hash(sourceEventId|relation|
+objectId)`). This is a **permanent stub row** — nothing in this design ever deletes a
+`$$commitments` record, same as the already-documented dropped-edge "ghost" risk above. Because
+`markDone` always sets `newStatus = "DONE"`, this specific stub is immediately filtered out of
+`openCommitments`'s scan (`status != "DONE"`), so it's invisible in the open-items view but still
+occupies a row in `$$commitments` forever — silent storage pollution, not a visible bug.
+
+One distinction from the already-documented ghost case worth logging: the prior ghost (dropped
+source edge) always originates from a `commitmentId` that *was* real at some point — a
+deterministic hash of a genuine `ACTION_NEEDED` edge. This new case is different in kind: the
+HTTP layer accepts **any string** as `commitmentId`, not just hash-shaped ones — there is no
+format validation either, only the depot append. So the pollution key-space is unbounded, not
+just "real IDs whose source edge later disappeared."
+
+### Decision flagged for the deploy session — not resolved now, per instruction
+
+Whether `POST /commitments/{id}/done` should `localSelect`-check `$$commitments` for the
+`commitmentId`'s existence before accepting the mark-done (return 404 on a miss) versus keep the
+current auto-vivify-on-anything behavior as an accepted, Layer-2-consistent tradeoff (same
+philosophy as the auto-create-with-no-review-gate decision, Fork 4, already accepted for
+commitment *creation*). No code changed for this — explicitly deferred to the user's judgment in
+the deploy session.
+
+**Bundled with a second, related pre-deploy flag** (also raised by the user in this same
+conversation turn, not a new finding of mine): the `/debug/pstate*` and `/debug/inject-test-event`
+routes are currently unauthenticated and bolted directly onto the same Javalin app instance that
+`/webhooks/gmail` listens on — if `RAMA_MODE=cluster` is used with the real Cloudflare tunnel
+(README.md:62-69) without gating or stripping them first, they'd be reachable from the public
+internet: `/debug/inject-test-event` can forge arbitrary `$$family-data`/`$$commitments` writes
+with no auth, and `/debug/pstate*` leaks the full family record. Both this and the mark-done
+validation question are deploy-session decisions, not resolved here.

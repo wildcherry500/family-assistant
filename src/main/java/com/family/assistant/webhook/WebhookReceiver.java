@@ -5,9 +5,15 @@ import com.family.assistant.query.QueryModule;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rpl.agentorama.AgentClient;
+import com.rpl.rama.Depot;
+import com.rpl.rama.PState;
+import com.rpl.rama.Path;
 import io.javalin.Javalin;
 
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -37,14 +43,20 @@ import java.util.Map;
 public class WebhookReceiver {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String DEFAULT_FAMILY_ID = "keeling-family-001";
 
     private final AgentClient gmailIngestionClient;
     private final AgentClient queryAgentClient;
+    private final PState commitmentsPState;
+    private final Depot statusChangesDepot;
     private Javalin app;
 
-    public WebhookReceiver(AgentClient gmailIngestionClient, AgentClient queryAgentClient) {
+    public WebhookReceiver(AgentClient gmailIngestionClient, AgentClient queryAgentClient,
+                            PState commitmentsPState, Depot statusChangesDepot) {
         this.gmailIngestionClient = gmailIngestionClient;
         this.queryAgentClient = queryAgentClient;
+        this.commitmentsPState = commitmentsPState;
+        this.statusChangesDepot = statusChangesDepot;
     }
 
     // -----------------------------------------------------------------------
@@ -103,7 +115,68 @@ public class WebhookReceiver {
             }
         });
 
-        System.out.println("[WebhookReceiver] Listening on port " + port + " at POST /webhooks/gmail, POST /query");
+        // -----------------------------------------------------------------------
+        // Layer 2 commitments — open-items view (scan-and-filter, no new index;
+        // $$commitments-by-status is deliberately deferred to Layer 3) and mark-done
+        // (appends to *commitment-status-changes only — $$commitments itself is owned
+        // exclusively by FamilySchemaModule's stream topology, never written here)
+        // -----------------------------------------------------------------------
+
+        app.get("/commitments/{familyId}", ctx -> {
+            String familyId = ctx.pathParam("familyId");
+            ctx.json(openCommitments(familyId));
+        });
+
+        app.post("/commitments/{commitmentId}/done", ctx -> {
+            String commitmentId = ctx.pathParam("commitmentId");
+            String familyId = DEFAULT_FAMILY_ID;
+            if (!ctx.body().isBlank()) {
+                JsonNode body = MAPPER.readTree(ctx.body());
+                familyId = body.path("familyId").asText(DEFAULT_FAMILY_ID);
+            }
+
+            markDone(familyId, commitmentId);
+            ctx.json(Map.of("status", "ok"));
+        });
+
+        System.out.println("[WebhookReceiver] Listening on port " + port
+            + " at POST /webhooks/gmail, POST /query, GET /commitments/{familyId}, POST /commitments/{id}/done");
+    }
+
+    /**
+     * Open-items view: scan $$commitments for a family, filter out status == DONE in plain
+     * Java. No $$commitments-by-status index — deliberately deferred to Layer 3.
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> openCommitments(String familyId) {
+        Map<String, Object> all = (Map<String, Object>) commitmentsPState.selectOne(Path.key(familyId));
+        List<Map<String, Object>> openItems = new ArrayList<>();
+        if (all == null) return openItems;
+
+        for (Map.Entry<String, Object> entry : all.entrySet()) {
+            Map<String, Object> record = (Map<String, Object>) entry.getValue();
+            Object status = record.get("status");
+            if (!"DONE".equals(status)) {
+                Map<String, Object> withId = new HashMap<>(record);
+                withId.put("commitmentId", entry.getKey());
+                openItems.add(withId);
+            }
+        }
+        return openItems;
+    }
+
+    /**
+     * Mark-done: appends a status-change event to *commitment-status-changes only.
+     * Never writes $$commitments directly — that PState is owned exclusively by
+     * FamilySchemaModule's stream topology.
+     */
+    public void markDone(String familyId, String commitmentId) {
+        Map<String, Object> change = new HashMap<>();
+        change.put("familyId", familyId);
+        change.put("commitmentId", commitmentId);
+        change.put("newStatus", "DONE");
+        change.put("changedAt", System.currentTimeMillis());
+        statusChangesDepot.append(change);
     }
 
     public void stop() {
