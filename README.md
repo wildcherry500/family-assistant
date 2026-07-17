@@ -81,7 +81,10 @@ The assistant will:
 - Register a Gmail watch for each configured account (auto-renews every 5 days)
 - Listen for push notifications on `POST /webhooks/gmail`
 - Parse incoming emails into structured events
-- Serve debug endpoints at `/debug/pstate` and `/debug/pstate/{familyId}`
+- Serve debug endpoints at `/debug/pstate`, `/debug/pstate/{familyId}`, and
+  `/debug/inject-test-event` — **only when `DEBUG_ROUTES_ENABLED=true` is set**. Off by
+  default; when unset, these routes are not registered at all. Do not enable this in an
+  environment exposed through the Cloudflare tunnel.
 
 ## Switching Modes
 

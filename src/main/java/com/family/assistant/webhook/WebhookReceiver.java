@@ -135,8 +135,21 @@ public class WebhookReceiver {
                 familyId = body.path("familyId").asText(DEFAULT_FAMILY_ID);
             }
 
+            // Existence read is transport-level request validation only — it decides the
+            // HTTP response code, not what gets appended. markDone always appends regardless;
+            // the authoritative guard against an unknown-ID stub lives in FamilySchemaModule's
+            // status-change branch (gate-review revision C, EDGE_CODE_RULES.md Gate 6/Gate 8).
+            // Can race a mid-flight event (a commitment created moments ago, not yet drained)
+            // and return a false 404 — accepted tradeoff for a human tapping an item on screen.
+            boolean existed = commitmentExists(familyId, commitmentId);
             markDone(familyId, commitmentId);
-            ctx.json(Map.of("status", "ok"));
+
+            if (existed) {
+                ctx.json(Map.of("status", "ok"));
+            } else {
+                ctx.status(404);
+                ctx.json(Map.of("status", "not_found"));
+            }
         });
 
         System.out.println("[WebhookReceiver] Listening on port " + port
@@ -163,6 +176,18 @@ public class WebhookReceiver {
             }
         }
         return openItems;
+    }
+
+    /**
+     * True if commitmentId already has a record in $$commitments for this family. Used only
+     * to pick the HTTP response code on mark-done (transport-level request validation) — it
+     * does not gate whether markDone appends; the real guard is in the topology.
+     */
+    @SuppressWarnings("unchecked")
+    public boolean commitmentExists(String familyId, String commitmentId) {
+        Map<String, Object> record = (Map<String, Object>) commitmentsPState.selectOne(
+            Path.key(familyId).key(commitmentId));
+        return record != null;
     }
 
     /**

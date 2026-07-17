@@ -145,65 +145,70 @@ public class FamilyAssistantApp {
         receiver.start(port);
 
         // -----------------------------------------------------------------------
-        // Debug endpoint: GET /debug/pstate/{familyId}
-        // Returns the full $$family-data entry for the given familyId as JSON.
+        // Debug routes — gated behind DEBUG_ROUTES_ENABLED (default off), per gate-review
+        // revision D. When unset/false, these routes are never registered at all (not just
+        // 404'd) — nothing to strip before the Cloudflare tunnel exposes the app. See
+        // README.md's "Debug endpoints" section for the flag.
         // -----------------------------------------------------------------------
-        PState familyData = cluster.clusterPState(schemaModuleName, "$$family-data");
-        ObjectMapper mapper = new ObjectMapper();
+        boolean debugRoutesEnabled = Boolean.parseBoolean(System.getenv("DEBUG_ROUTES_ENABLED"));
+        if (debugRoutesEnabled) {
+            System.out.println("[FamilyAssistantApp] DEBUG_ROUTES_ENABLED=true — /debug/* routes registered");
 
-        // GET /debug/pstate/{familyId} — all events for a family
-        receiver.getApp().get("/debug/pstate/{familyId}", ctx -> {
-            String familyId = ctx.pathParam("familyId");
-            Object data = familyData.selectOne(Path.key(familyId));
-            ctx.result(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data));
-            ctx.contentType("application/json");
-        });
+            // GET /debug/pstate/{familyId} and /debug/pstate — full $$family-data entry as JSON.
+            PState familyData = cluster.clusterPState(schemaModuleName, "$$family-data");
+            ObjectMapper mapper = new ObjectMapper();
 
-        // GET /debug/pstate — shortcut for the hardcoded family id
-        receiver.getApp().get("/debug/pstate", ctx -> {
-            Object data = familyData.selectOne(Path.key("keeling-family-001"));
-            ctx.result(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data));
-            ctx.contentType("application/json");
-        });
+            receiver.getApp().get("/debug/pstate/{familyId}", ctx -> {
+                String familyId = ctx.pathParam("familyId");
+                Object data = familyData.selectOne(Path.key(familyId));
+                ctx.result(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data));
+                ctx.contentType("application/json");
+            });
 
-        // -----------------------------------------------------------------------
-        // Debug endpoint: POST /debug/inject-test-event
-        // Appends directly to *family-events — the same depot EmailParsingModule appends
-        // to after LLM extraction (EmailParsingModule.java:374-375). Bypasses Gmail fetch
-        // and LLM classification only; everything downstream (FamilySchemaModule's real
-        // stream topology: $$family-data, $$edges-forward/inverse, $$entities,
-        // $$commitments) runs exactly as in production. Manual test-injection utility,
-        // same ad hoc pattern as the /debug/pstate routes above — not part of the
-        // reviewed webhook route surface.
-        // -----------------------------------------------------------------------
-        Depot familyEventsDepot = cluster.clusterDepot(schemaModuleName, "*family-events");
+            receiver.getApp().get("/debug/pstate", ctx -> {
+                Object data = familyData.selectOne(Path.key("keeling-family-001"));
+                ctx.result(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(data));
+                ctx.contentType("application/json");
+            });
 
-        receiver.getApp().post("/debug/inject-test-event", ctx -> {
-            String familyId = "keeling-family-001";
-            String eventId = "debug-evt-" + System.currentTimeMillis();
+            // POST /debug/inject-test-event — appends directly to *family-events, the same
+            // depot EmailParsingModule appends to after LLM extraction
+            // (EmailParsingModule.java:374-375). Bypasses Gmail fetch and LLM classification
+            // only; everything downstream (FamilySchemaModule's real stream topology:
+            // $$family-data, $$edges-forward/inverse, $$entities, $$commitments) runs exactly
+            // as in production. Manual test-injection utility, not part of the reviewed
+            // webhook route surface.
+            Depot familyEventsDepot = cluster.clusterDepot(schemaModuleName, "*family-events");
 
-            Map<String, String> relation = new HashMap<>();
-            relation.put("relation", "ACTION_NEEDED");
-            relation.put("objectType", "PERSON");
-            relation.put("object", "Todd");
-            List<Map<String, String>> relations = new ArrayList<>();
-            relations.add(relation);
+            receiver.getApp().post("/debug/inject-test-event", ctx -> {
+                String familyId = "keeling-family-001";
+                String eventId = "debug-evt-" + System.currentTimeMillis();
 
-            Map<String, Object> event = new HashMap<>();
-            event.put("id", eventId);
-            event.put("familyId", familyId);
-            event.put("title", "Debug injected event — sign permission slip");
-            event.put("description", "Manually injected via /debug/inject-test-event to verify the open-items/mark-done loop.");
-            event.put("tags", new ArrayList<String>());
-            event.put("personId", new ArrayList<String>());
-            event.put("relations", relations);
-            event.put("created", System.currentTimeMillis());
-            event.put("sourceType", "test");
+                Map<String, String> relation = new HashMap<>();
+                relation.put("relation", "ACTION_NEEDED");
+                relation.put("objectType", "PERSON");
+                relation.put("object", "Todd");
+                List<Map<String, String>> relations = new ArrayList<>();
+                relations.add(relation);
 
-            familyEventsDepot.append(event);
+                Map<String, Object> event = new HashMap<>();
+                event.put("id", eventId);
+                event.put("familyId", familyId);
+                event.put("title", "Debug injected event — sign permission slip");
+                event.put("description", "Manually injected via /debug/inject-test-event to verify the open-items/mark-done loop.");
+                event.put("tags", new ArrayList<String>());
+                event.put("personId", new ArrayList<String>());
+                event.put("relations", relations);
+                event.put("created", System.currentTimeMillis());
+                event.put("sourceType", "test");
 
-            ctx.json(Map.of("status", "ok", "eventId", eventId, "familyId", familyId));
-        });
+                familyEventsDepot.append(event);
+
+                ctx.json(Map.of("status", "ok", "eventId", eventId, "familyId", familyId));
+            });
+        } else {
+            System.out.println("[FamilyAssistantApp] DEBUG_ROUTES_ENABLED not set — /debug/* routes not registered");
+        }
 
         // -----------------------------------------------------------------------
         // Gmail watch renewal scheduler — renew every 5 days (7-day expiry)

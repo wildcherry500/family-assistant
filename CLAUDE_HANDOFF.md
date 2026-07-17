@@ -15,9 +15,11 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **144/144 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
-  2026-07-16 open-items/mark-done session (+1: new `OpenItemsAndMarkDoneTest` — see
-  "Recently Completed" below). Prior to that, 143/143 as of the same-day Layer 2
+- **145/145 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
+  2026-07-17 pre-deploy gate-review session (Part 1 of the first real cluster deploy:
+  unknown-ID topology guard + debug-route gating — see "Recently Completed" below).
+  Prior to that, 144/144 as of the 2026-07-16 open-items/mark-done session (+1: new
+  `OpenItemsAndMarkDoneTest` — see "Recently Completed" below). Prior to that, 143/143 as of the same-day Layer 2
   Commitments write-path session (+6: new `CommitmentsTest` — see "Recently Completed"
   below). Prior to that, 137/137 as of the
   2026-07-15 graph-schema-evolution session (+11: new `EdgesEntityIndexTest` covering
@@ -96,7 +98,7 @@ gcloud pubsub topics add-iam-policy-binding gmail-push-notifications --project=f
 | `$$entities-by-type` | `familyId -> entityType` | `Set<entityId>` | PERSON/ORG/PLACE/PROJECT/UNKNOWN. Added 2026-07-15. Makes the `UNKNOWN` bucket an inspectable indexed queue — the trigger for eventually promoting a `WORK` type (creative-work mentions currently fall to UNKNOWN) is real recurring volume showing up here, not a guess. See `REASONING.md`'s 2026-07-15 entry. |
 | `$$leverage-map` | `familyId -> entryId` | `{silo, intent, weight}` | Config, not an index. silo/intent null = wildcard. Populated via `*weakness-leverage-config` depot. Read by DigestModule to reorder events (matches float to top, chronological tiebreak). |
 | `$$weakness-map` | `familyId -> entryId` | `{silo, intent, tag, note}` | Same depot/config pattern as leverage-map. Read by DigestModule to annotate matched events with a `Note:` line. |
-| `$$commitments` | `familyId -> commitmentId` | `{sourceEventId, objectId, createdAt, status, updatedAt}` | Layer 2 commitments. Added 2026-07-16. Seeded ONLY from `ACTION_NEEDED` edges (Fork 3) — `intent`/`$$events-by-intent` stays an untouched, independent search dimension. `commitmentId = hash(sourceEventId\|relation\|objectId)` — deterministic (`nameUUIDFromBytes`, never random), duplicates across events allowed by design (Fork 5, same shape as entity-ID non-dedup). `sourceEventId`/`objectId`/`createdAt` are content — always refreshed by the `family-events-stream` creation branch on every redrain, since they're deterministic from the source edge. `status` is write-once: initialized to `OPEN` only the first time a commitment is seen (guarded by a `localSelect`-then-`ifTrue` read that happens before any write in that event), and thereafter owned exclusively by the `*commitment-status-changes` depot's own branch (a second `.source(...)` on the SAME topology — see `RAMA_VERIFIED_LEARNINGS.md`, a PState can only be written by one topology). States: `OPEN, IN_PROGRESS, WAITING, DONE, DISMISSED` (Fork 2) — closed value set, not an enforced state machine. Auto-create, no review gate (Fork 4); `DISMISSED` is the after-the-fact undo, including for a "ghost" commitment whose source edge later stops being extracted (see `REASONING.md`'s 2026-07-16 implementation entry). No `$$commitments-by-status` index this session — deliberately deferred as Layer 3 scanning infrastructure. First read/write consumers added 2026-07-16 (same day): `WebhookReceiver`'s `GET /commitments/{familyId}` (scan-and-filter open-items view, still no index) and `POST /commitments/{id}/done` (appends to `*commitment-status-changes` only). Not yet read by `QueryModule.java`/`DigestModule.java` — that's a later session. |
+| `$$commitments` | `familyId -> commitmentId` | `{sourceEventId, objectId, createdAt, status, updatedAt}` | Layer 2 commitments. Added 2026-07-16. Seeded ONLY from `ACTION_NEEDED` edges (Fork 3) — `intent`/`$$events-by-intent` stays an untouched, independent search dimension. `commitmentId = hash(sourceEventId\|relation\|objectId)` — deterministic (`nameUUIDFromBytes`, never random), duplicates across events allowed by design (Fork 5, same shape as entity-ID non-dedup). `sourceEventId`/`objectId`/`createdAt` are content — always refreshed by the `family-events-stream` creation branch on every redrain, since they're deterministic from the source edge. `status` is write-once: initialized to `OPEN` only the first time a commitment is seen (guarded by a `localSelect`-then-`ifTrue` read that happens before any write in that event), and thereafter owned exclusively by the `*commitment-status-changes` depot's own branch (a second `.source(...)` on the SAME topology — see `RAMA_VERIFIED_LEARNINGS.md`, a PState can only be written by one topology). **The status-change branch itself also `localSelect`s-then-`ifTrue`-guards on existence (added 2026-07-17, gate-review revision C): a status change for a commitmentId the ACTION_NEEDED branch never seeded is dropped, not auto-vivified into a stub — closes an unbounded-key-space write surface flagged by `EDGE_CODE_RULES.md` Gate 6/Gate 8. This does NOT affect the separate "ghost" case below (a real commitment whose source edge later disappears) — that risk is unrelated and still accepted.** States: `OPEN, IN_PROGRESS, WAITING, DONE, DISMISSED` (Fork 2) — closed value set, not an enforced state machine. Auto-create, no review gate (Fork 4); `DISMISSED` is the after-the-fact undo, including for a "ghost" commitment whose source edge later stops being extracted (see `REASONING.md`'s 2026-07-16 implementation entry). No `$$commitments-by-status` index this session — deliberately deferred as Layer 3 scanning infrastructure. First read/write consumers added 2026-07-16: `WebhookReceiver`'s `GET /commitments/{familyId}` (scan-and-filter open-items view, still no index) and `POST /commitments/{id}/done` (appends to `*commitment-status-changes` only; also does a `commitmentExists` read as of 2026-07-17, transport-level only — picks the HTTP response code, does not gate the append). Not yet read by `QueryModule.java`/`DigestModule.java` — that's a later session. |
 
 ### $$events-by-date — Rama 1.5.0 API notes (verified by testing)
 
@@ -145,12 +147,12 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 
 ---
 
-## Test Suite (144 tests, all non-LLM)
+## Test Suite (145 tests, all non-LLM)
 
 | Test class | Tests | What it covers |
 |---|---|---|
-| `CommitmentsTest` | 6 | `$$commitments` write-path — creation fires on first sight from an `ACTION_NEEDED` edge with correct content + initial `OPEN` status; independent edges mint distinct commitmentIds (no cross-event dedup); a non-`ACTION_NEEDED` relation seeds nothing (Fork 3 scoping); a status-change event updates `status`/`updatedAt` and leaves content untouched; **redraining the identical source edge after a status change does NOT reset `status` back to `OPEN`** (the core Fork 1 guarantee, verified individually via the surefire XML report, not just suite-green); a status change for a not-yet-materialized commitment auto-vivifies a stub record. Added 2026-07-16. |
-| `OpenItemsAndMarkDoneTest` | 1 | Full loop over `WebhookReceiver`'s `openCommitments`/`markDone` (no HTTP, direct method calls against `InProcessCluster`-sourced `PState`/`Depot` handles): ingest an `ACTION_NEEDED` event → commitment appears in the open-items view → mark-done appends a status change → commitment disappears from the open-items view → redrain the identical source event → commitment stays absent, status verified to remain `DONE`. Added 2026-07-16. |
+| `CommitmentsTest` | 6 | `$$commitments` write-path — creation fires on first sight from an `ACTION_NEEDED` edge with correct content + initial `OPEN` status; independent edges mint distinct commitmentIds (no cross-event dedup); a non-`ACTION_NEEDED` relation seeds nothing (Fork 3 scoping); a status-change event updates `status`/`updatedAt` and leaves content untouched; **redraining the identical source edge after a status change does NOT reset `status` back to `OPEN`** (the core Fork 1 guarantee, verified individually via the surefire XML report, not just suite-green); a status change for a not-yet-materialized commitment is **dropped, not stubbed** (test 6, rewritten 2026-07-17 — previously asserted the opposite auto-vivify-stub behavior; see `REASONING.md`'s 2026-07-17 entry for why that's now superseded). Added 2026-07-16, test 6 revised 2026-07-17. |
+| `OpenItemsAndMarkDoneTest` | 2 | Full loop over `WebhookReceiver`'s `openCommitments`/`markDone` (no HTTP, direct method calls against `InProcessCluster`-sourced `PState`/`Depot` handles): ingest an `ACTION_NEEDED` event → commitment appears in the open-items view → mark-done appends a status change → commitment disappears from the open-items view → redrain the identical source event → commitment stays absent, status verified to remain `DONE`. Plus (added 2026-07-17): `commitmentExists` returns true for a real, seeded commitmentId and false for an arbitrary garbage one — the transport-level read the mark-done endpoint uses to pick its HTTP response code. Added 2026-07-16, +1 test 2026-07-17. |
 | `EdgesEntityIndexTest` | 11 | `$$edges-forward`/`$$edges-inverse`/`$$entities`/`$$entities-by-type` — forward+inverse edge materialization (paired: inverse assertions use the exact objectId extracted from the forward set, a genuine cross-direction consistency check, not two decoupled existence checks), entity-ID collapse within one event (two relations, same object+type → one entity row), cross-event distinctness (no dedup), `$$entities-by-type` inspectability for PERSON/PLACE **and the UNKNOWN bucket specifically** (a genuinely-unrecognized mention resolves back to its raw `canonicalName` via the index — the exact mechanism the `WORK`-type deferral depends on), no-op on an absent `relations` field, and idempotency under a simulated redrain (re-append the identical record, assert no new entities/no set growth, same entityId re-derived). Added 2026-07-15. |
 | `MultiValueIndexTest` | 8 | Multi-element `tags`/`personId` fan-out completeness, tag/person branch isolation (no field bleed), keyword-branch coexistence under `anchor`/`hook`, and classifier-field `null` round-trip. Added 2026-07-05. |
 | `NonLlmPipelineTest` | 20 | Schema → DigestModule pipeline, time filtering, serialization |
@@ -430,6 +432,43 @@ without booting Javalin.
 (1 test) exercises the full loop: ingest an `ACTION_NEEDED` event → commitment appears in the
 open-items view → mark-done → commitment disappears from the open-items view → redrain the identical
 source event → commitment stays absent (status verified to remain `DONE`, not reset to `OPEN`).
+
+## Recently Completed (2026-07-17) — Pre-deploy Part 1: unknown-ID topology guard + debug-route gating
+
+Part 1 of the first real cluster deploy plan (`~/.claude/plans/first-cluster-deploy.md`),
+landed after a full pass through the user's Lumino Plan Review Gate checklist (now also
+copied into this repo at `docs/PLAN_REVIEW_GATE.md` — an 11-gate red-team checklist a
+separate Claude-chat session runs against Claude Code plans before approval). Two new project
+docs landed this session: `EDGE_CODE_RULES.md` (standing rule — edge/glue code receives →
+appends raw → acks, no business decisions; read alongside this file and
+`RAMA_VERIFIED_LEARNINGS.md` before writing any code) and `docs/PLAN_REVIEW_GATE.md`.
+
+**Unknown-ID handling reversed, not extended (gate-review revision C):** the authoritative
+fix moved from an edge-side check (rejected — violates `EDGE_CODE_RULES.md` Gate 6/Gate 8,
+"deduplicating/checking existence before append belongs in a topology, not the edge") into
+`FamilySchemaModule`'s status-change branch itself: a new `localSelect`/`ifTrue` guard
+(mirroring the creation branch's existing pattern) drops a status change for any
+commitmentId the ACTION_NEEDED branch never seeded, instead of auto-vivifying a stub with an
+unbounded key-space. `WebhookReceiver` keeps a `commitmentExists` read, but only to pick the
+HTTP response code (404 vs 200) — it doesn't gate whether `markDone` appends, which it always
+does; that read can race a mid-flight event and return a false 404, an accepted tradeoff.
+`CommitmentsTest`'s test 6 previously asserted the OPPOSITE (auto-vivify creates a stub) —
+rewritten to assert the drop instead, since that's exactly the behavior this guard removes.
+The separate dropped-source-edge "ghost" case (a commitment that DID exist at creation time,
+whose ACTION_NEEDED edge later stops being extracted) is unrelated and still on the accepted
+list — see `REASONING.md`'s 2026-07-17 entry for the full distinction.
+
+**Debug routes gated (gate-review revision D):** `/debug/pstate`, `/debug/pstate/{familyId}`,
+and `/debug/inject-test-event` now only register at all when `DEBUG_ROUTES_ENABLED=true` is
+set — default off, and when off the routes don't exist rather than 404ing. `README.md`
+updated to document the flag and warn against enabling it behind the Cloudflare tunnel.
+
+**145/145 non-LLM tests green** (was 144/144) — net +1 (`OpenItemsAndMarkDoneTest` gained a
+`commitmentExists` test; `CommitmentsTest` stayed at 6, with test 6 rewritten not added to).
+Zero other regressions. No deploy command run this session — Part 1 (code) only, per the
+plan's own gating; Part 2 (cluster deploy) and Part 3 (go-live) are a separate session's work,
+starting from an audit-first read of this file and `RAMA_VERIFIED_LEARNINGS.md` per standing
+instruction.
 
 ## Next Task
 

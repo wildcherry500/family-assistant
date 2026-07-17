@@ -2440,3 +2440,126 @@ routes are currently unauthenticated and bolted directly onto the same Javalin a
 internet: `/debug/inject-test-event` can forge arbitrary `$$family-data`/`$$commitments` writes
 with no auth, and `/debug/pstate*` leaks the full family record. Both this and the mark-done
 validation question are deploy-session decisions, not resolved here.
+
+## 2026-07-17 — First cluster deploy plan: gate-review revisions A/B/C/D
+
+Planning session for the first real deploy of current code to the persistent cluster (2 of 6
+modules deployed, `FamilySchemaModule` dated Apr 11 — pre-graph-schema, pre-commitments). Plan
+went through the user's separate Lumino Plan Review Gate process (a Claude-chat-run checklist,
+`SKILL.md` at `~/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/
+.../skills/lumino-plan-review-gate/`, located via filesystem search this session — an 11-gate
+red-team checklist Claude Code plans must pass before approval). Four revisions came back;
+this entry records revision A's verification trail, since the user explicitly asked for the
+source to be cited here. Revisions B, C, D were design decisions, not verification — recorded
+in the plan file (`~/.claude/plans/first-cluster-deploy.md`) rather than duplicated here.
+
+### Revision A — deploy parallelism, verified against RPL docs (not assumed)
+
+The plan originally proposed a uniform `--tasks 1 --threads 1 --workers 1 --replicationFactor 1`
+for all 6 modules, including the 2 already deployed in April via `--action update`. Gate review
+flagged this as unverified: does `--action update` accept changed parallelism on an existing
+module, and can task count change post-launch at all? Verified via `WebFetch` against
+`redplanetlabs.com/docs/~/operating-rama.html` (not from memory, not from `RAMA_VERIFIED_LEARNINGS.md`
+alone, per that file's own "Verify-at-source" discipline and the gate checklist's identical
+reminder):
+
+- **Task count is permanently fixed at launch.** Doc quote: *"Currently Rama does not support
+  changing the number of tasks for a module, though adding support for this is high priority
+  for us."*
+- **`--action update` does not accept parallelism flags at all.** Doc quote: *"Parallelism
+  settings (tasks, threads, workers) are not specified on module update since the new version
+  of the module will use the same settings as the old module."*
+- **Post-launch thread/worker/replication changes are a separate command,** `rama scaleExecutors`
+  (`--threads`/`--workers`/`--replicationFactor`, no `--tasks` option). Corroborated
+  independently by `rama scaleExecutors --help` against the actual pinned CLI — the absence of
+  a `--tasks` flag there matches the docs' claim that task count can't be changed by any
+  mechanism, not just `update`.
+
+**Resolution:** the 2 April modules (`FamilySchemaModule`, `EmailIngestionModule`) get
+`--action update` with no parallelism flags at all — whatever April used is what persists, and
+there was never a real choice available here despite how the original plan phrased it. The
+alternative (destroy + relaunch to pick a different task count for these two) is a destructive
+op that conflicts with "no destructive action on `rama-data/` without stop-and-report" and with
+the separate "657MB April data is inspect-first, no wipe decision yet" call — not pursued,
+since the verification didn't surface a blocker requiring it. The 4 never-deployed modules get
+real parallelism choices since this is their one, permanent chance to set task count:
+`--tasks 4 --threads 4 --workers 1 --replicationFactor 1` — flagged in the plan as the one
+genuinely irreversible number in the whole deploy, to be confirmed before the command runs, not
+silently executed just because it was the pre-approved default.
+
+No code changed, no deploy command run this session — plan-only, per instruction.
+
+## 2026-07-17 (continued) — Part 1 executed: unknown-ID guard lands, test 6 superseded
+
+Same-day follow-on, after gate-review revisions A/B/C/D were folded into the plan and the
+user approved executing Part 1 (pre-deploy code items) in this window, stopping before any
+daemon start. `EDGE_CODE_RULES.md` was supplied by the user (previously flagged missing in
+the Step 0 audit) and saved to the repo root; the Lumino Plan Review Gate checklist source
+was located via filesystem search (`SKILL.md` under `~/Library/Application Support/Claude/
+local-agent-mode-sessions/skills-plugin/.../skills/lumino-plan-review-gate/`) and copied into
+`docs/PLAN_REVIEW_GATE.md`.
+
+### Test 6 supersedes its own prior logged behavior — flagging explicitly per instruction
+
+`CommitmentsTest.statusChangeForNeverSeenCommitmentCreatesStub` (added 2026-07-16, logged in
+that day's "Layer 2 Commitments write-path" entry above) asserted that a status change for an
+unknown commitmentId auto-vivifies a stub record — that was the correct, intended behavior at
+the time, relying on Rama's auto-vivify with no existence check, since `$$commitments-by-status`
+was out of scope and nothing else needed the old status read.
+
+Gate-review revision C reversed this by design: `EDGE_CODE_RULES.md` Gate 6/Gate 8 flagged the
+original plan's fix (an edge-side existence check before append) as itself a violation —
+"deduplicating/checking existence before append" is exactly the creep signal the doc calls out,
+and belongs in a topology, not the edge. The authoritative fix instead added a `localSelect`/
+`ifTrue` existence guard to `FamilySchemaModule`'s status-change branch itself (mirroring the
+creation branch's existing guard pattern) — a status change for a commitmentId the ACTION_NEEDED
+branch never seeded is now dropped entirely, no write, no stub.
+
+**This session's test 6 rewrite (`statusChangeForNeverSeenCommitmentIsDroppedNotStubbed`)
+supersedes the 2026-07-16 entry's logged auto-vivify-stub behavior — a future session reading
+that earlier entry should NOT treat "auto-vivify creates a stub for an unknown ID" as still
+live.** That consequence is gone as of this session; the current behavior is "dropped, no write
+at all."
+
+**The separate dropped-source-edge "ghost" case is a different mechanism, unaffected, still
+accepted.** That risk (logged in the 2026-07-16 Commitments entry above) is: a commitment that
+DID exist — created for real, from a real `ACTION_NEEDED` edge at some point — whose source edge
+later stops being extracted by a parser change. Nothing in this design ever deletes a
+`$$commitments` record, so that commitment becomes a permanent "ghost" with stale content that
+will never refresh again. This is unrelated to today's fix: today's guard only prevents a
+*status change* from creating a *brand-new* record for an ID that was never real in the first
+place. A ghost's `commitmentId` WAS real at creation time, so the new existence guard does
+nothing to it — it still exists in `$$commitments`, and its status can still be legitimately
+changed (including via `DISMISSED`, the already-accepted fix for both the ghost case and the
+no-review-gate auto-create risk, Fork 4). Two distinct risks, two distinct fixes, only one of
+which changed today.
+
+### What else landed in Part 1
+
+- `WebhookReceiver.commitmentExists(familyId, commitmentId)` — new public method,
+  `selectOne(Path.key(familyId).key(commitmentId))` against `$$commitments` (same non-subindexed
+  read shape as `openCommitments`, confirmed safe under Gate 5 during the gate-review pass).
+  Used only to pick the mark-done endpoint's HTTP response code (200 vs 404) — `markDone` still
+  always appends to `*commitment-status-changes` regardless of what this read finds; it does not
+  gate the append. Accepted race: a commitment created moments ago and not yet drained can read
+  as "doesn't exist" and return a false 404 to a human tapping something already on screen.
+- `DEBUG_ROUTES_ENABLED` env flag (default off) in `FamilyAssistantApp.java` — when unset, the
+  `/debug/pstate`, `/debug/pstate/{familyId}`, and `/debug/inject-test-event` route-registration
+  calls are skipped entirely, not just left to 404. `README.md` updated to document the flag and
+  warn against enabling it behind the Cloudflare tunnel.
+- New test: `OpenItemsAndMarkDoneTest.commitmentExists_trueForRealCommitment_falseForGarbageId`.
+
+### Test results
+
+`mvn test` (full suite, non-LLM): **145/145 green** (was 144/144), `BUILD SUCCESS`. Net +1 test,
+landing as: `OpenItemsAndMarkDoneTest` gained one test (`commitmentExists` true/false check);
+`CommitmentsTest` stayed at 6 tests, with test 6 rewritten (not added to) — matching the Gate 10
+correction made during gate review ("test 6 reverses, not extends"). Zero other regressions.
+`CLAUDE_HANDOFF.md` updated in the same pass: test count (144→145), `$$commitments` PState row,
+test-suite table (both `CommitmentsTest` and `OpenItemsAndMarkDoneTest` rows), new "Recently
+Completed" entry.
+
+No deploy command run, no daemon started — Part 1 (pre-deploy code items) only, per the plan's
+own gating. Part 2 (cluster deploy) and Part 3 (go-live) are explicitly a separate session's
+work, per the user's instruction to open a fresh window and audit-first against this file and
+`RAMA_VERIFIED_LEARNINGS.md` before starting any daemon.

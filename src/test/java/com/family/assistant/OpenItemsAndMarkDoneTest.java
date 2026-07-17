@@ -164,4 +164,19 @@ public class OpenItemsAndMarkDoneTest {
             com.rpl.rama.Path.key(FAMILY_ID).key(commitmentId));
         assertEquals("DONE", rec.get("status"));
     }
+
+    @Test
+    void commitmentExists_trueForRealCommitment_falseForGarbageId() {
+        appendEvent("evt-exists-check", 4000L, List.of(
+            triple("ACTION_NEEDED", "PERSON", "Jordan")
+        ));
+        waitUntil("commitment materialized for evt-exists-check",
+            () -> commitmentIdForSourceEvent("evt-exists-check") != null);
+        String realId = commitmentIdForSourceEvent("evt-exists-check");
+
+        assertTrue(receiver.commitmentExists(FAMILY_ID, realId),
+            "a commitmentId the ACTION_NEEDED branch actually seeded must resolve as existing");
+        assertFalse(receiver.commitmentExists(FAMILY_ID, "totally-garbage-id-12345"),
+            "an arbitrary, never-seeded commitmentId must resolve as not existing");
+    }
 }

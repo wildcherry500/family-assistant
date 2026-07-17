@@ -212,24 +212,26 @@ public class CommitmentsTest {
         assertEquals(1000L, rec.get("createdAt"), "content refreshed to the same value, idempotently");
     }
 
-    // ---- 6. Status change arriving before creation ever ran: auto-vivified stub ----
+    // ---- 6. Status change arriving before creation ever ran: dropped, not stubbed ----
+    // REVISED 2026-07-17 (gate-review revision C): this test previously asserted the OPPOSITE
+    // — that an unknown commitmentId auto-vivifies a stub. That behavior is exactly what the
+    // status-change branch's new localSelect/ifTrue existence guard (FamilySchemaModule.java)
+    // now prevents, closing an unbounded-key-space write surface (EDGE_CODE_RULES.md Gate 6/
+    // Gate 8; see REASONING.md's 2026-07-17 entry for the full trail). This does NOT affect
+    // the separate dropped-source-edge "ghost" case (a commitment that DID exist at creation
+    // time, whose ACTION_NEEDED edge later stops being extracted) — that risk is unrelated and
+    // stays on the accepted list.
 
     @Test
     @Order(6)
-    void statusChangeForNeverSeenCommitmentCreatesStub() {
+    void statusChangeForNeverSeenCommitmentIsDroppedNotStubbed() throws Exception {
         String ghostId = "stub-ghost-commitment-1";
         appendStatusChange(ghostId, "WAITING", 9000L);
-        waitUntilStatus(ghostId, "WAITING");
+        Thread.sleep(2000);
 
-        Map<String, Object> rec = commitmentRecord(ghostId);
-        assertNotNull(rec, "a status change for a not-yet-materialized commitment must still "
-            + "apply — auto-vivify, not silently dropped");
-        assertEquals("WAITING", rec.get("status"));
-        assertEquals(9000L, rec.get("updatedAt"));
-        assertNull(rec.get("sourceEventId"), "identity fields stay absent until/unless the "
-            + "creation branch ever processes a matching ACTION_NEEDED edge for this id");
-        assertNull(rec.get("objectId"));
-        assertNull(rec.get("createdAt"));
+        assertNull(commitmentRecord(ghostId),
+            "a status change for a commitmentId the ACTION_NEEDED branch never seeded must be "
+            + "dropped by the existence guard — no stub, ever, not even a partial one");
     }
 
     private String soleElement(Set<String> set) {
