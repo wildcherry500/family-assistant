@@ -1,8 +1,18 @@
 # Rama single-node configuration — Mac Mini local production
 #
-# IMPORTANT: /Volumes/CORSAIR must be mounted before starting ZooKeeper.
-# If the drive is not mounted, local.dir will silently fall back to the
-# boot volume and PState data will be written to the wrong location.
+# IMPORTANT: local.dir must point to a drive that is mounted and has
+# sufficient free space before starting ZooKeeper. If the target drive is
+# not mounted, local.dir will silently fall back to the boot volume and
+# PState data will be written to the wrong location.
+#
+# 2026-07-17: moved local.dir from /Volumes/CORSAIR (exFAT) to internal
+# APFS. exFAT's AppleDouble sidecar files crashed Conductor's stale-jar
+# cleanup with repeated IOExceptions (see REASONING.md). The April data
+# that lived under /Volumes/CORSAIR/rama-data was confirmed disposable
+# (empty skeleton, zero real writes, verified via RocksDB's own
+# cumulative-writes stats) before this change — it was not migrated.
+# If local.dir is ever pointed back at an external/removable drive, the
+# original mount-order caution above still applies.
 #
 # Setup: copy this file to ~/rama-release/rama.yaml alongside the ./rama CLI.
 # See README.md for the full startup sequence.
@@ -11,8 +21,8 @@ zookeeper.servers:
   - "localhost"
 
 # PState data, depot replica logs, and module JARs all live here.
-# /Volumes/CORSAIR is fast NVMe and already hosts the project source.
-local.dir: "/Volumes/CORSAIR/rama-data"
+# Internal APFS — proper journaling/locking, no AppleDouble issue.
+local.dir: "/Users/toddkeelingfolder/rama-data"
 
 conductor.host: "localhost"
 

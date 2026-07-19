@@ -254,6 +254,20 @@ discriminator) already followed this rule by accident, since they were always si
 per topology; `$$commitments` is the first PState in this codebase genuinely fed by two
 different depots, and is the first place this constraint became visible.
 
+### `rama moduleStatus` takes the short module name, not the fully-qualified class name
+Verified 2026-07-19 (Part 2 cluster deploy session) the hard way: `rama moduleStatus
+com.family.assistant.schema.FamilySchemaModule` returned `{"moduleState":"NOT_ALIVE", ...}`
+even immediately after Conductor's own log confirmed `Launch of module FamilySchemaModule
+complete!` / `module-state [running]`. Re-running as `rama moduleStatus FamilySchemaModule`
+(short name — matches what Conductor's log itself calls the module throughout its state-machine
+handlers) correctly returned `{"moduleState":"RUNNING", "appendTargetId":"...", ...}`. The
+`--module` flag on `rama deploy` takes the fully-qualified class name (confirmed working:
+`--module com.family.assistant.schema.FamilySchemaModule` launched successfully), but
+`moduleStatus`/`moduleInstanceStatus` want the short name Conductor assigns internally. Don't
+trust a `NOT_ALIVE` from `moduleStatus` as proof a module was never deployed without first
+confirming you queried the short name — cross-check against `local.dir/conductor/jars/` contents
+or the Conductor log directly if in doubt.
+
 ---
 
 ## Unverified — do not use without confirming

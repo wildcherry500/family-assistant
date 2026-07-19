@@ -470,6 +470,27 @@ plan's own gating; Part 2 (cluster deploy) and Part 3 (go-live) are a separate s
 starting from an audit-first read of this file and `RAMA_VERIFIED_LEARNINGS.md` per standing
 instruction.
 
+## Recently Completed (2026-07-19) — Part 2: cluster deploy, all six modules live on internal APFS
+
+Fixed the exFAT/AppleDouble crash from 2026-07-18 by repointing `rama.yaml`'s `local.dir` to
+`/Users/toddkeelingfolder/rama-data` (internal APFS). This session: started ZooKeeper, Conductor,
+Supervisor — all confirmed stable, Conductor specifically verified past the exact cleanup-cycle
+crash point that killed it on exFAT. Deployed all six modules fresh (`--action launch --tasks 4
+--threads 4 --workers 1 --replicationFactor 1` — the fresh APFS `local.dir` meant none of the six
+had prior state to `update`, including the two deployed back in April to the now-superseded exFAT
+cluster). All six confirmed `RUNNING` via `rama moduleStatus <ShortName>` (short name, not FQCN —
+see `RAMA_VERIFIED_LEARNINGS.md`). `rama numSupervisors` → `1`, license active/2-node capacity, no
+concern. Full detail and the memory-pressure finding below: `REASONING.md`'s 2026-07-19 entries.
+
+**Part 2 is complete. Part 3 (Gmail/OAuth/ingestion) is next, but its first step is worker-heap
+right-sizing, not OAuth.** Six worker JVMs at the current uniform `worker.child.opts: -Xmx4096m`
+commit 24GB of max heap on a 24GB machine — deploy-time churn alone (no steady-state load yet) hit
+~59MB free system memory and made the heaviest module (`QueryModule`, two agents) take 8+ minutes
+instead of the ~30s the other five needed. Nothing crashed, but there's no margin left for the
+real load Part 3 adds (Gmail fetch, LLM calls, active stream processing). Right-size
+`worker.child.opts` (uniformly lower, or per-module if the lighter ingestion modules don't need
+4GB) before doing any Gmail/OAuth/ingestion work.
+
 ## Next Task
 
 **Multi-event extraction in `EmailParsingModule`** — one email currently always yields

@@ -2563,3 +2563,134 @@ No deploy command run, no daemon started — Part 1 (pre-deploy code items) only
 own gating. Part 2 (cluster deploy) and Part 3 (go-live) are explicitly a separate session's
 work, per the user's instruction to open a fresh window and audit-first against this file and
 `RAMA_VERIFIED_LEARNINGS.md` before starting any daemon.
+
+## 2026-07-18 — exFAT crash, root cause and fix (config only, recorded retroactively)
+
+`local.dir` was `/Volumes/CORSAIR/rama-data` (exFAT). Conductor crashed during its stale-jar
+cleanup cycle: `Deleting stale jar` for `._com.family.assistant.email.EmailIngestionModule_...jar`
+(a macOS AppleDouble sidecar file, artifact of exFAT lacking the metadata support HFS+/APFS have)
+threw `java.io.IOException: Couldn't delete ...`, which propagated up through
+`util.throwable-handler` as "Scheduled item execution failed. Terminating scheduler" — 26ms after
+"Conductor started successfully!" — and the daemon halted. Root cause is the filesystem, not
+Rama/Conductor logic: exFAT has no journaling/locking and macOS silently drops AppleDouble
+sidecar files (`._*`) into any exFAT directory it touches, and Conductor's cleanup routine has no
+tolerance for an undeletable file in its jars directory. Fix applied (uncommitted, working
+change): `~/rama-release/rama.yaml`'s `local.dir` repointed to
+`/Users/toddkeelingfolder/rama-data` (internal APFS). The April data under
+`/Volumes/CORSAIR/rama-data` was confirmed disposable (empty skeleton, zero real writes per
+RocksDB's own cumulative-writes stats) before the repoint — not migrated. Note: this incident
+isn't otherwise documented anywhere in this file before this entry — `rama.yaml`'s own comment
+says "see REASONING.md" but nothing existed here until now; that pointer was stale/wrong until
+this retroactive entry.
+
+## 2026-07-19 — Part 2: cluster deploy, daemon verification + launch-vs-update finding
+
+Fresh session, audit-first per instruction (`CLAUDE_HANDOFF.md`, this file, `RAMA_VERIFIED_LEARNINGS.md`,
+`EDGE_CODE_RULES.md`, plus this project's `CLAUDE.md`). Step 0 confirmed: `local.dir` reads the
+APFS path, `/Users/toddkeelingfolder/rama-data` exists and is empty, no Rama processes running.
+
+**ZooKeeper + Conductor started, watched specifically for the exFAT crash's exact failure mode.**
+Conductor's log file (`~/rama-release/logs/conductor.log`) is append-only across restarts, so the
+2026-07-17 exFAT crash and tonight's APFS run sit back-to-back in the same file — direct
+side-by-side comparison, not a memory of the old behavior. Tonight: `Conductor started
+successfully!` at 10:14:42.484, then **no** `Deleting stale jar` lines at all (the fresh APFS
+`rama-data` is empty, so the cleanup cycle found nothing to touch), no ERROR, no IOException, no
+"Halting process." Confirmed stable 85+ seconds past startup, process alive, port 8889 held.
+Caveat: since the directory was empty, this run didn't exercise an actual stale-jar *deletion* on
+APFS — only confirmed the crash doesn't recur when there's nothing to clean up. The first real
+stale-jar deletion on APFS is still unverified; worth revisiting once jars actually age out
+post-deploy.
+
+**Launch-vs-update question, resolved against real cluster state, not assumed.** The existing
+plan (`~/.claude/plans/first-cluster-deploy.md`, gate-review revision A) had `FamilySchemaModule`
+and `EmailIngestionModule` — deployed to the OLD exFAT Conductor back in April — using
+`--action update`, since a module's task count can never change and `update` accepts no
+parallelism flags (verified 2026-07-17 against `redplanetlabs.com/docs/~/operating-rama.html`).
+But this session's Conductor is backed by a brand-new, empty APFS `local.dir` — the April jars
+never crossed over. Checked directly rather than assumed:
+```
+$ rama moduleStatus com.family.assistant.schema.FamilySchemaModule
+{"moduleState":"NOT_ALIVE", ...}
+$ rama moduleStatus com.family.assistant.email.EmailIngestionModule
+{"moduleState":"NOT_ALIVE", ...}
+```
+Both `NOT_ALIVE` — this Conductor has zero record of either module. **All six modules require
+`--action launch`, not just the four that were always fresh** — the update/launch split from the
+2026-07-17 plan no longer applies verbatim on this fresh data dir. This also means all six get a
+real, one-time, permanent parallelism choice, not just four of them.
+
+**Supervisor started and watched the same way as Conductor.** `root-dir` confirmed
+`/Users/toddkeelingfolder/rama-data` (APFS) in the log. `Started supervisor!` at 10:28:10.299, no
+further log lines (nothing to house-keep on an empty data dir), process alive 35+ seconds later.
+`rama numSupervisors` → `1` (was `0` before Supervisor started, confirming the query reflects
+real state, not a stale cache). `rama licenseInfo` → active license, `num-nodes: 2`,
+`1917-12-16`–`2117-12-16` (effectively unlimited dev license) — answers the historical "not
+enough licensed supervisors" question: 1 registered Supervisor against 2 licensed nodes, no
+capacity concern.
+
+**Fat JAR build gap found and fixed.** `mvn clean package -DskipTests` alone produced only the
+78KB thin jar (`target/family-assistant-1.0.0.jar`) — `pom.xml`'s `maven-assembly-plugin`
+(lines 114-121) declares the `jar-with-dependencies` descriptor but has no `<executions>` block
+binding it to a build phase, so plain `package` never invokes it. Not a Rama/AOR issue, a Maven
+wiring gap. Fixed operationally (no `pom.xml` edit) by running the assembly goal explicitly:
+`mvn clean package assembly:single -DskipTests`, producing the real 259MB
+`target/family-assistant-1.0.0-jar-with-dependencies.jar` needed for `rama deploy --jar`.
+
+Six `--action launch` commands presented for approval next; none run yet.
+
+## 2026-07-19 (continued) — Part 2 complete: all six modules deployed to internal APFS
+
+User approved all six `--action launch --tasks 4 --threads 4 --workers 1 --replicationFactor 1`,
+dependency order (schema → parsing → ingestion → gmail → digest/query), confirmed the fresh jar
+build. Deployed one at a time, each confirmed `RUNNING` via `moduleStatus` before the next.
+
+**(a) Full fresh deploy — old exFAT April deployment fully superseded.** All six modules —
+`FamilySchemaModule`, `EmailParsingModule`, `EmailIngestionModule`, `GmailIngestionModule`,
+`DigestModule`, `QueryModule` — launched fresh via `--action launch` on the internal-APFS
+Conductor/Supervisor (no `--action update` needed anywhere, confirmed correct per the earlier
+`NOT_ALIVE` finding). Final state, verified via `rama moduleStatus <ShortName>` for all six:
+`RUNNING`. `rama numSupervisors` → `1`. The old exFAT-backed deployment (April, 2 of 6 modules)
+is no longer live anywhere — this is a clean, complete platform on the fixed filesystem.
+
+**(b) `rama moduleStatus` CLI usage correction, made mid-session.** First attempt queried by
+fully-qualified class name (`com.family.assistant.schema.FamilySchemaModule`) and got
+`NOT_ALIVE` even though Conductor's own log showed `Launch of module FamilySchemaModule
+complete!` / `module-state [running]` moments earlier. Re-querying with the short name
+(`FamilySchemaModule` — what Conductor's log itself calls it throughout) correctly returned
+`RUNNING`. `--module` on `rama deploy` takes the FQCN; `moduleStatus`/`moduleInstanceStatus` want
+the short name. Recorded in `RAMA_VERIFIED_LEARNINGS.md`. This also means the earlier (Step-3,
+pre-deploy) `NOT_ALIVE` checks used the wrong query syntax — the launch-vs-update conclusion they
+fed into was still correct (independently confirmed by the empty `local.dir/conductor/jars/` and
+by Conductor logging "Creating new state machine" — a genuinely fresh launch, not a collision),
+but the verification method itself was flawed and is documented as such rather than quietly
+smoothed over.
+
+**(c) Fat-jar build gap.** `mvn clean package -DskipTests` alone produces only the 78KB thin jar —
+`pom.xml`'s `maven-assembly-plugin` has no `<executions>` binding, so `mvn clean package
+assembly:single -DskipTests` is required to produce the real
+`target/family-assistant-1.0.0-jar-with-dependencies.jar` (259MB). Verified fresh before deploy:
+jar timestamp postdated every file under `src/`.
+
+**(d) Memory finding — the real blocker for Part 3, more so than OAuth/Gmail.** This Mac Mini has
+24GB total RAM. Each worker JVM launches with `-Xmx4096m` (`worker.child.opts` in `rama.yaml`);
+six workers is 24GB of *committed max heap* alone, on a 24GB machine, before Conductor
+(`-Xmx1024m`), Supervisor (`-Xmx1024m`), or ZooKeeper are even counted. This wasn't a hypothetical
+— it showed up directly during tonight's deploy: modules 1-5 each completed in 10-40s per phase;
+`QueryModule` (module 6, the heaviest — two agents, `query-agent` + `search-agent`, roughly double
+the internal AOR-managed PStates/RocksDB stores of a single-agent module) took over 8 minutes
+end-to-end, with every phase (capture deploy info, build jar, upload, download, worker
+RocksDB-open calls) running 5-10x slower than the same phase on earlier modules. `vm_stat` at the
+time showed ~59MB of free physical memory (3625 pages × 16KB) with system load average 5.67 — real
+resource contention, not a QueryModule code/topology defect (worker log showed zero errors/
+exceptions/OOM signatures throughout, just slow RocksDB opens and long gaps between init steps).
+No JVM actually OOM'd tonight — the deploy succeeded — but there is zero headroom, and Part 3 adds
+real ingestion load (Gmail fetch, LLM calls, active stream processing) on top of six already-tight
+JVMs. **Worker heap right-sizing (`worker.child.opts` in `rama.yaml`, currently `-Xmx4096m`
+uniform for all six) is flagged as the required first step of Part 3, ahead of any Gmail/OAuth
+work** — not because anything is broken now, but because the margin observed tonight (system-wide
+near-zero free memory just from deploy-time JVM startup churn, no steady-state load yet) won't
+survive real ingestion without either lowering per-worker heap or deciding lighter modules
+(email/gmail ingestion, digest) need less than the heavier ones (query, schema).
+
+No Supervisor config changes, no Gmail/OAuth calls, no ingestion — session stops here, at the
+Part 2/Part 3 boundary, per instruction.
