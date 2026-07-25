@@ -23,6 +23,21 @@ Rama 1.5.0 and Agent-o-rama 0.8.0 are fully composable. Whatever the business lo
 
 - **Agent-o-rama full docs:** `docs/Agent_O_Rama_Complete_Documentation.md` — read this before writing any agent code. It contains the complete API for AgentModule, AgentTopology, AgentNode, AgentManager, AgentClient, streaming, human input, datasets, experiments, and observability.
 - **Project state & PState schema:** `CLAUDE_HANDOFF.md` — canonical reference for all PStates, indexes, module structure, test suite, GCP config, and cluster setup.
+- **Verified platform learnings:** `RAMA_VERIFIED_LEARNINGS.md` — version-pinned facts confirmed against our exact `rama:1.5.0` / `agent-o-rama:0.8.0` deps. Wins over any doc or example on conflict.
+
+---
+
+## Standing Rule: Check Chat-o-rama Before Guessing Any Rama API — But Know Its Scope
+
+Chat-o-rama (chat.redplanetlabs.com) is the first stop before guessing any Rama/AOR API — **but only for operational and API-surface questions**, where it is authoritative: deploy actions, CLI flags, config keys, `--configOverrides` semantics, parallelism rules, module lifecycle, licensing, and "does X exist / is X supported" questions about the documented API surface (with doc citations).
+
+**Chat-o-rama explicitly refuses dataflow-language and topology-design questions** — it will not reason about runtime binding behavior (e.g. `*result`), will not recommend which predicate/operation to use in a topology, and will not produce dataflow code examples. For those, the fallback order is:
+
+1. **Official RPL docs (redplanetlabs.com/docs) read directly** — fetch and read the page; quote the doc text.
+2. **`rama-examples` repo** — with a staleness caveat: it targets Rama 0.11.4, so patterns may be stale. Treat as a hint, not a fact.
+3. **Empirical InProcessCluster test** — the authoritative answer for runtime dataflow/binding behavior. Write the smallest test that isolates the question, observe the result, and **write it back into `RAMA_VERIFIED_LEARNINGS.md` as a new verified entry.**
+
+Never guess a dataflow assumption and proceed — that's the class of error that produces silent wrong behavior. See `RAMA_VERIFIED_LEARNINGS.md` ("Chat-o-rama scope limitation") for the verbatim refusal and full detail.
 
 ---
 

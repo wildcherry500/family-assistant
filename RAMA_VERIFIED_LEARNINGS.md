@@ -18,6 +18,50 @@ separate sections — never mix them.
 
 ## Verified
 
+### Chat-o-rama scope limitation — what it will and won't answer
+Status: VERIFIED — observed directly, 2026-07 (Rama 1.5.0 / AOR 0.8.0 era).
+
+Chat-o-rama (chat.redplanetlabs.com) remains the first stop for Rama/AOR API questions, but
+it has a hard boundary. Verbatim refusal received:
+
+> "This question is specifically about Rama's dataflow language and Java dataflow API
+> behavior. I'm not allowed to write or infer dataflow/topology behavior beyond what's in the
+> official docs, and I can't provide or reason about concrete dataflow code examples
+> (including how particular bindings like *result behave, or which predicate you should use in
+> a given topology)."
+
+**What Chat-o-rama WILL answer (use it here — it's authoritative)**
+- Operational / cluster questions: deploy actions, CLI flags, config keys, `--configOverrides`
+  semantics, parallelism rules, module lifecycle, licensing.
+- Documented behavior quoted from official docs, with citations.
+- "Does X exist / is X supported" questions about the documented API surface.
+- Version-pinned facts (e.g. task count fixed at launch; update accepts no parallelism flags).
+
+**What Chat-o-rama WILL NOT answer (do not expect it — find another source)**
+- Dataflow language semantics beyond literal doc text.
+- How specific bindings behave at runtime (e.g. `*result`, anonymous vars, scoping).
+- Which predicate/operation to use in a given topology — i.e. design questions.
+- Concrete dataflow/topology code examples.
+- Inferred or reasoned-out behavior not explicitly stated in the docs.
+
+**Fallback order when Chat-o-rama declines**
+1. Official RPL docs directly — fetch and read the relevant page, don't ask about it. Quote the
+   doc text.
+2. rama-examples repo — with the caveat it targets older Rama (0.11.4), so patterns may be
+   stale; treat as a hint, not a fact.
+3. Empirical test in InProcessCluster — the authoritative answer for runtime binding/dataflow
+   behavior. Write the smallest test that isolates the question, observe, and record the result
+   HERE as a new verified learning.
+
+Never guess and proceed. A dataflow assumption that "seems right" is exactly the class of error
+that produces silent wrong behavior (cf. the `selectOne`/`RocksDBWrapper` and
+`moduleStatus: RUNNING` traps).
+
+**Practical consequence:** the standing rule "check Chat-o-rama before guessing any Rama API"
+holds for operational and API-surface questions. For dataflow semantics and topology design,
+Chat-o-rama is not a source — InProcessCluster empiricism is, and every answer found that way
+must be written back into this file.
+
 ### `waitForStreamProcessedCount` does not exist
 There is no such method for stream topologies. Source: `redplanetlabs.com/docs/~/testing.html`.
 Stream topology processing synchronizes via `AckLevel` on the append call itself (see
@@ -254,6 +298,33 @@ discriminator) already followed this rule by accident, since they were always si
 per topology; `$$commitments` is the first PState in this codebase genuinely fed by two
 different depots, and is the first place this constraint became visible.
 
+### `worker.child.opts` heap only reliably applies via `--configOverrides` per deploy, and it is NOT inherited between deploys — verified by actually doing it
+**Confirmed 2026-07-19 (Part 3 restart session) by direct action, not just reading docs:**
+`--configOverrides <file>.yaml` passed on `rama deploy --action update` (pointing at a small YAML
+file containing `worker.child.opts: "-Xmx<value>"`) does reliably set the worker JVM heap — proven
+twice, `FamilySchemaModule` and `EmailParsingModule` both redeployed with a
+`worker-heap-overrides.yaml` containing `worker.child.opts: "-Xmx1536m"`, and both confirmed by
+grepping the fresh `supervisor.log`'s `Launching process` line for the new worker instance: actual
+launched command showed `-Xmx1536m`, not the prior `-Xmx4096m`. This grep-verify step is mandatory
+after any heap change — trusting `moduleStatus: RUNNING` alone is not enough, since that only
+confirms the module came up, not what heap it came up with.
+
+Also confirmed via Chat-o-rama (chat.redplanetlabs.com, citing `rama-shared → "Operating Rama
+clusters" → "Updating modules"`): `--action update` always requires `--jar` even for a pure config
+change (no lighter config-only/reconfigure command exists), always performs a full module-instance
+transition (new worker processes launched, old torn down), and **config overrides from a previous
+deploy are never inherited** — every future `--action update` for a module must resupply
+`--configOverrides` or that module's workers revert to whatever the fallback default resolves to.
+Practically: each of this project's six modules needs its OWN `--configOverrides` redeploy any time
+its heap should change, and this must be repeated on every future code-change redeploy too, not just
+this one-time right-sizing pass.
+
+**Open question, NOT resolved — see "Unverified" section below:** whether `rama.yaml`'s own
+`worker.child.opts` can ALSO work as a cluster-wide default (the docs say it should; our observed
+history says it hasn't, three separate times). Do not treat `rama.yaml`'s value as either reliably
+inert or reliably authoritative until that's tested in isolation — `--configOverrides` is the only
+mechanism verified end-to-end in this project so far.
+
 ### `rama moduleStatus` takes the short module name, not the fully-qualified class name
 Verified 2026-07-19 (Part 2 cluster deploy session) the hard way: `rama moduleStatus
 com.family.assistant.schema.FamilySchemaModule` returned `{"moduleState":"NOT_ALIVE", ...}`
@@ -268,8 +339,78 @@ trust a `NOT_ALIVE` from `moduleStatus` as proof a module was never deployed wit
 confirming you queried the short name — cross-check against `local.dir/conductor/jars/` contents
 or the Conductor log directly if in doubt.
 
+### `moduleStatus: RUNNING` does NOT prove a `--action update` actually cut over — check `appendTargetId` against the real new instance ID
+Verified 2026-07-19 (Part 3 pre-restart session) the hard way, on real hardware under real memory
+pressure: `FamilySchemaModule`'s `rama deploy --action update --configOverrides` (changing worker
+heap from `-Xmx4096m` to `-Xmx1536m`) was initially reported as confirmed successful, based on (1)
+`moduleStatus` returning `"moduleState":"RUNNING"` and (2) a `supervisor.log` grep showing a
+`Launching process` line with the new `-Xmx1536m`. **Both checks passed and the conclusion was
+still wrong.** The new worker instance (`ada41606-...`, port 3007) got stuck at the
+`UPDATE-PREPARE-HANDOVER` state-machine stage (visible in its own `worker-3007.log`, which simply
+stops emitting lines mid-sequence) and was killed by Supervisor's heartbeat watchdog 36 seconds
+after launch (`supervisor.log`: `"Port 3007 heartbeat is no longer valid, moving to KILLING"`). The
+module never stopped serving traffic throughout this — it just silently kept serving the OLD
+instance (`55b3c805-...`, port 3001, still `-Xmx4096m`) — which is exactly why `moduleStatus`
+legitimately said `RUNNING` the whole time without that being evidence the update took effect.
+
+**The check that actually catches this:** compare `moduleStatus`'s `appendTargetId` (and
+`readTargetId`) against the specific instance ID from the update's own launch log line (Supervisor
+logs `:module-instance-id` at worker launch, e.g. `d-worker-supervision - Launching worker
+{:port 3007, :module-name FamilySchemaModule, ...}` paired with the worker's own `Worker launch
+start...` line naming `:module-instance-id`). If `appendTargetId` still matches the PRE-update
+instance ID, the cutover never completed, regardless of what `moduleState` says or whether a
+`Launching process` line with the right `-Xmx` briefly appeared in the log. A launch attempt is not
+a successful cutover — only a matching serving instance ID proves that. `EmailParsingModule`'s
+update, run immediately after by the same procedure, was re-checked this way and DID genuinely
+succeed (`appendTargetId` matched its new instance, confirmed still alive and processing 19+
+minutes later) — so this isn't a universal failure of the update mechanism, but a per-module risk
+that scales with how much state a module owns and how loaded the machine is at the time.
+
+**Correlated but unconfirmed:** this failure happened while system free RAM was at 73MB, load
+average 6.2 (vs. an idle 1.5), and the memory compressor held 10GB — i.e. under real, active memory
+pressure. `FamilySchemaModule` owns far more PState/depot surface (15 PStates + 3 depots) than any
+other module in this project, so its handover likely has more RocksDB/task-state sync work to fit
+inside Supervisor's ~30-second heartbeat window than a lighter module's does. Whether the RAM
+pressure caused the timeout (slower sync → miss the window) or the two are merely coincidental was
+NOT isolated with a controlled test — flagged as a real risk, not proven causation.
+
 ---
 
 ## Unverified — do not use without confirming
 
-*(none currently — every constraint referenced this session was resolved above)*
+### OPEN INVESTIGATION: does `rama.yaml`'s `worker.child.opts` apply to CLI-deployed modules at all?
+Logged 2026-07-19 (Part 3 restart session), deliberately deferred to a dedicated future session —
+this is a clean-experiment task, not something to resolve mid-grind while other modules are being
+redeployed.
+
+**The contradiction:** Chat-o-rama (chat.redplanetlabs.com), citing `rama-shared → "All configs"`,
+states plainly that configs including `worker.child.opts` "are set either through the rama.yaml
+file, through the --configOverrides flag..., or programmatically when creating a
+RamaClusterManager" — i.e. `rama.yaml` should be a valid, working, cluster-wide default. But this
+project's actual observed history contradicts that, three separate times: `rama.yaml` has read
+`worker.child.opts: "-Xmx2g"` continuously since the file was created in March 2026 (confirmed via
+`git log -p -- rama.yaml`), yet workers launched at `-Xmx4096m` (Rama's undocumented-here-but-
+jar-confirmed built-in default) on the April deploy, the 2026-07-19 fresh six-module deploy, AND
+tonight's Supervisor auto-recovery of all six modules after the cold restart — none of which passed
+`--configOverrides`. Three independent real-world data points, zero in which `rama.yaml`'s value
+took effect.
+
+**Leading hypothesis, NOT tested:** `rama.yaml`'s config values may only reach a worker JVM via the
+**programmatic** path — i.e. when an application constructs its own `RamaClusterManager` (as
+`FamilySchemaModule` etc.'s owning app, `FamilyAssistantApp`, does via `RamaClusterManager.open()`
+using this same `rama.yaml`) — and may simply not be consulted by the **CLI-deploy path**
+(`rama deploy` → Conductor → Supervisor launching a worker process), which might only ever consult
+`--configOverrides` or fall back straight to Rama's own hardcoded default, skipping `rama.yaml`
+entirely for that code path. This has NOT been verified against source or by a clean test.
+
+**How to test cleanly (future session, not mid-task):** pick one already-`--configOverrides`-tuned
+module (e.g. `FamilySchemaModule`, currently at `-Xmx1536m`), edit `rama.yaml`'s `worker.child.opts`
+to a third, distinct value (e.g. `-Xmx1234m` — deliberately not a round number so it's unambiguous
+in a log grep), redeploy with `--action update` and **no** `--configOverrides` flag at all, and grep
+the resulting `supervisor.log` `Launching process` line. If it shows `-Xmx1234m`, `rama.yaml` DOES
+apply to CLI deploys (contradicts observed history — worth understanding why prior deploys differed,
+e.g. maybe `rama.yaml` needs to be re-synced to `~/rama-release/rama.yaml` at the exact right moment
+relative to Conductor's own read of it). If it shows `-Xmx4096m` (Rama's hardcoded default), the
+programmatic-vs-CLI-path hypothesis is confirmed. Do not run this test opportunistically inside a
+different task's redeploy — it needs to be the one deliberate variable changed, isolated from
+whatever redeploy work is otherwise in progress.
