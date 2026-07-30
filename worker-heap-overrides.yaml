@@ -1,0 +1,13 @@
+# --configOverrides file for `rama deploy` — sets per-worker JVM heap.
+#
+# rama.yaml's own worker.child.opts is INERT for deployed modules (confirmed
+# 2026-07-19 against redplanetlabs.com/docs/~/operating-rama.html — see
+# RAMA_VERIFIED_LEARNINGS.md). Rama's built-in default is -Xmx4096m and that
+# is what applies unless this flag is passed explicitly on every deploy:
+#
+#   rama deploy --action launch --configOverrides worker-heap-overrides.yaml ...
+#
+# Config overrides are NOT inherited between deploys — this file must be
+# passed on every future launch/update for every module, or heap silently
+# reverts to 4096m.
+worker.child.opts: "-Xmx1536m"

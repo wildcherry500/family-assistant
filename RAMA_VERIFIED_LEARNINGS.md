@@ -45,13 +45,34 @@ it has a hard boundary. Verbatim refusal received:
 - Inferred or reasoned-out behavior not explicitly stated in the docs.
 
 **Fallback order when Chat-o-rama declines**
-1. Official RPL docs directly — fetch and read the relevant page, don't ask about it. Quote the
-   doc text.
-2. rama-examples repo — with the caveat it targets older Rama (0.11.4), so patterns may be
+REVISED 2026-07-26 — jar extraction promoted above official docs; see "A cited doc quote is not
+verification" below for the evidence that forced the reorder.
+1. **Direct jar inspection** — `javap` against the actual class in `~/.m2`, or `unzip` the jar and
+   read the `.java` sources it ships (the `agent-o-rama` jar ships all 78 of them; the `rama` jar
+   ships classes only, so `javap` there). This is the highest authority for anything about the API
+   surface: it is our exact pinned version, it cannot describe a release we don't run, and it
+   cannot be stale. Prefer it over any doc quote, from Chat-o-rama or otherwise.
+2. Official RPL docs directly — fetch and read the relevant page, don't ask about it. Quote the
+   doc text. Authoritative for *behavior* the jar can't show (trimming cadence, migration
+   semantics, cutover rules), but subordinate to the jar on *what exists and what its signature
+   is*.
+3. rama-examples repo — with the caveat it targets older Rama (0.11.4), so patterns may be
    stale; treat as a hint, not a fact.
-3. Empirical test in InProcessCluster — the authoritative answer for runtime binding/dataflow
+4. Empirical test in InProcessCluster — the authoritative answer for runtime binding/dataflow
    behavior. Write the smallest test that isolates the question, observe, and record the result
    HERE as a new verified learning.
+
+**A cited doc quote is not verification.** Verified 2026-07-26 (depot-lifecycle audit session). A
+citation proves a doc *says* something; it does not prove the claim is true of our pinned version,
+and it does not prove the claim is complete. Three dictated "doc-sourced" depot facts were checked
+against `redplanetlabs.com/docs/~/depots.html` and `operating-rama.html` that session: one was
+confirmed verbatim, and two were contradicted by the very pages they were attributed to — a claim
+that no depot retention policy exists (the docs document depot trimming, with four dynamic options),
+and a claim that `migration` iterates the full depot (the docs say it "takes effect instantly
+regardless of the size of the depot" and applies lazily on read). The failure mode is not that the
+docs are wrong; it's that a plausible-sounding attribution to them had never actually been read back
+against them. Read the page. Quote the sentence. If the sentence doesn't say it, the fact doesn't
+go in this file.
 
 Never guess and proceed. A dataflow assumption that "seems right" is exactly the class of error
 that produces silent wrong behavior (cf. the `selectOne`/`RocksDBWrapper` and
@@ -374,6 +395,119 @@ inside Supervisor's ~30-second heartbeat window than a lighter module's does. Wh
 pressure caused the timeout (slower sync → miss the window) or the two are merely coincidental was
 NOT isolated with a controlled test — flagged as a real risk, not proven causation.
 
+### Depot and PState names are permanent — an undeclared depot is DESTROYED on module update, partitions deleted from disk
+VERIFIED FACT (Rama 1.5.0). Verified 2026-07-26 by fetching and reading
+`redplanetlabs.com/docs/~/operating-rama.html` ("Updating modules") directly. Two verbatim
+sentences, both from that page:
+
+> "There's currently no way to rename a depot or PState in a module update."
+
+> "Any depot or PState defined in the old module that's not defined in the new module is
+> considered destroyed."
+
+and, on the consequence:
+
+> "Because removing a PState or depot is destructive – Rama will delete all partitions from the
+> filesystems of worker nodes..."
+
+**The two combine into a rule the docs never state in one sentence:** since a rename is impossible
+and an omission is a destroy-with-disk-delete, a depot name is a permanent decision. There is no
+safe "rename" path — the closest equivalent is declare-new + migrate-forward + drop-old, which
+means a full re-drain into the new name and an accepted, irreversible deletion of the old
+partitions. Typos, prefixes, and pluralization in a depot name are load-bearing forever. Get the
+name right at `declareDepot` time.
+
+This is not theoretical for us: `FamilySchemaModule` declares four depots (`*family-events`,
+`*weakness-leverage-config`, `*raw-emails`, `*commitment-status-changes`,
+`FamilySchemaModule.java:143-159`), and `*raw-emails` is the write-ahead log that makes any future
+re-parse possible. Dropping it from the module definition — even accidentally, even for one
+deploy — deletes the only copy of every raw email body from disk.
+
+**Jar-level anchor for the migration API this rule interacts with** — verified 2026-07-26 by
+`javap` against `~/.m2/repository/com/rpl/rama/1.5.0/rama-1.5.0.jar` (the rama jar ships no
+`.java` sources, unlike the agent-o-rama jar):
+
+```java
+public interface com.rpl.rama.Depot$Declaration {
+  Depot.Declaration global();
+  Depot.Declaration migration(String, com.rpl.rama.ops.RamaFunction1<?, ?>);
+}
+
+public interface com.rpl.rama.RamaModule$Setup {
+  Depot.Declaration declareDepot(String, com.rpl.rama.impl.NativeDepotPartitioning);
+  <T extends Depot.Partitioning> Depot.Declaration declareDepot(String, Class<T>);
+  ...
+}
+```
+
+`Depot.Declaration` has exactly those two methods and no others — `global()` IS real (it was in
+doubt), and `migration` is the only other thing you can attach to a depot declaration. Both
+`declareDepot` overloads return the `Declaration`, which is why attaching a migration is a
+fluent call on the `declareDepot(...)` result. The first overload takes the result of a `Depot`
+static factory — `javap com.rpl.rama.Depot` confirms those are `random()`,
+`hashBy(NativeRamaFunction1)`, `hashBy(Class<T extends RamaFunction1>)`, `hashBy(String)`, and
+`disallow()`, all returning `NativeDepotPartitioning` (a marker interface, zero methods). The
+second is for a custom partitioner passed as a `Class`, where `Depot.Partitioning<T>` declares
+`int choosePartitionIndex(T, int)`.
+
+Two consequences for this codebase. Our four calls use the `hashBy(String)` overload, whose
+declared type parameter `<T extends RamaFunction1>` is vestigial — it appears nowhere in the
+parameter list and is inferred to nothing at the call site, which is why the bare
+`Depot.hashBy("familyId")` compiles clean. And all four calls discard the returned
+`Depot.Declaration` (`FamilySchemaModule.java:143,144,149,159`), so we currently use neither
+`global()` nor `migration(...)` anywhere in the project.
+
+### `-Xmx` is a ceiling, not a reservation — worker heap arithmetic on `-Xmx` overstates real RAM need
+Verified 2026-07-29 (RAM-reduction audit session) from `hs_err_pid19834.log` in the project root —
+the crash log of the real `FamilySchemaModule` worker on port 3001, the module with the largest
+PState/depot surface in this project (15 PStates + 4 depots). That worker was launched with
+Rama's default `worker.child.opts`, confirmed verbatim from the crash log's own
+`Command Line:` / `jvm_args:` lines:
+
+```
+-Xmx4096m -XX:MaxDirectMemorySize=500m ... rpl.rama.distributed.daemon.worker 3001 FamilySchemaModule
+```
+
+and its heap at crash time was:
+
+```
+Heap:
+ garbage-first heap   total 352256K, used 196606K [0x0000000700000000, 0x0000000800000000)
+ Metaspace       used 290453K, committed 291968K, reserved 1310720K
+  class space    used 63116K, committed 63744K, reserved 1048576K
+```
+
+**G1 had committed only 352MB of the 4096MB ceiling, and was using 197MB of that.** So
+`-Xmx4096m` bought an address-space reservation the JVM never cashed in. **The consequence for
+sizing: "6 workers × 4096m = 24GB committed" is arithmetic on ceilings, not a real memory
+requirement, and must not be used to size a machine.** This is the specific error that produced
+this project's earlier "24GB is undersized, need 32GB" conclusion (see `REASONING.md`, 2026-07-29).
+The *observed* memory pressure on the Mini (73MB free, 10GB compressor) was real and measured; the
+leap from that to a 32GB requirement was not, because it was computed from `-Xmx` sums.
+
+**What the fixed per-JVM cost actually consists of**, from the same crash log plus the documented
+config defaults:
+- **Metaspace ≈ 290MB committed** (`used 290453K, committed 291968K`). This is Rama + Clojure +
+  Netty + every jar in `~/rama-release/lib/` + module classes. It is **near-identical across all six
+  workers**, because all six are launched with the same `rama.jar` + `lib/` classpath (confirmed
+  from `supervisor.log`'s `Launching process` command lines). This is the largest *duplicated*
+  per-worker cost, and it is the cost that consolidating modules would actually eliminate.
+- Code cache + thread stacks + GC metadata: not itemized in the crash log; Rama runs many threads
+  per worker by default (`worker.worp.server.threads` 10, `worker.weft.client.max.threads` 10,
+  plus task threads and Netty event loops — see `all-configs.html`).
+- Netty direct buffers, bounded by `-XX:MaxDirectMemorySize=500m` (Rama's
+  `worker.max.direct.memory.size` default, per `redplanetlabs.com/docs/~/all-configs.html`:
+  *"amount of direct memory to allocate to each worker process. Defaults to `500m`"*). Note this is
+  passed **in addition to** `-Xmx` and is NOT set by our `worker-heap-overrides.yaml`.
+
+Working estimate: **≈500–700MB fixed per worker, independent of workload.** Flagged as an
+*estimate extrapolated from a single snapshot of a single module under active memory pressure* —
+not a measured RSS profile of six healthy workers. The estimate is superseded the moment real RSS
+is recorded; that measurement is the next session's task (see `CLAUDE_HANDOFF.md`).
+
+**Rule going forward: size worker RAM from measured RSS, never from summed `-Xmx`.** A `-Xmx`
+value's job is to cap a runaway, not to declare a footprint.
+
 ---
 
 ## Unverified — do not use without confirming
@@ -414,3 +548,41 @@ relative to Conductor's own read of it). If it shows `-Xmx4096m` (Rama's hardcod
 programmatic-vs-CLI-path hypothesis is confirmed. Do not run this test opportunistically inside a
 different task's redeploy — it needs to be the one deliberate variable changed, isolated from
 whatever redeploy work is otherwise in progress.
+
+### OPEN QUESTION: is RocksDB's 256MB block cache per PState, per partition, or per worker?
+Logged 2026-07-29 (RAM-reduction audit session). Kept in the Unverified section deliberately —
+this file's own rule is never to mix verified and unverified items, and this one could not be
+resolved from the docs.
+
+**What IS confirmed**, verbatim from `redplanetlabs.com/docs/~/all-configs.html`, under the
+`pstate.rocksdb.options.builder` entry (fetched and read directly this session):
+
+> "PStates with a top-level map in the schema use RocksDB as the underlying durable storage. This
+> config lets you provide the full name of a class implementing
+> `com.rpl.rama.RocksDBOptionsBuilder` to configure the RocksDB instances. By default, RocksDB is
+> configured to use two-level indexing and have a 256MB block cache."
+
+**What is NOT stated anywhere in the docs:** the *scope* of that 256MB. The sentence says "the
+RocksDB instances" (plural) without saying whether one block cache is shared across them or each
+gets its own. `pstates.html` was also fetched and checked this session and does not resolve it
+either.
+
+**Why it matters here specifically, and why it isn't academic:** `FamilySchemaModule` declares 15
+PStates, all with top-level maps, across 4 tasks. The three candidate readings span two orders of
+magnitude for that one module:
+- per worker → 256MB (negligible)
+- per PState → ~3.8GB (dominates every other RAM item combined)
+- per PState partition → larger still
+
+This is off-heap, so it appears in RSS but NOT in the `-Xmx`/heap numbers recorded in the verified
+`-Xmx` entry above — meaning it is exactly the term that could invalidate the ≈500–700MB/worker
+fixed-cost estimate for this one module. **Do not finalize a box size on that estimate without
+resolving this.**
+
+**How to resolve it cheaply:** the next session's RSS measurement run answers it empirically without
+needing a doc answer at all — if `FamilySchemaModule`'s measured RSS lands near the other five
+workers', the cache is effectively per-worker; if it is GBs higher, it scales with PState count.
+Compare `FamilySchemaModule` (15 PStates) against `DigestModule` (0 declared PStates) on the same
+idle cluster; that single comparison discriminates between the readings. Failing that,
+`javap`/decompile `com.rpl.rama.RocksDBOptionsBuilder` and its call sites in the pinned
+`rama-1.5.0.jar` (jar inspection is this file's highest authority per the fallback order above).

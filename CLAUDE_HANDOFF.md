@@ -491,9 +491,134 @@ real load Part 3 adds (Gmail fetch, LLM calls, active stream processing). Right-
 `worker.child.opts` (uniformly lower, or per-module if the lighter ingestion modules don't need
 4GB) before doing any Gmail/OAuth/ingestion work.
 
-## Next Task
+## DECISION (2026-07-19, Part 3 pre-restart session) — Mac Mini deploy abandoned; moving to cloud
 
-**Multi-event extraction in `EmailParsingModule`** — one email currently always yields
+**The heap-right-sizing attempt above didn't just proceed slowly — it hit a hard wall that proved
+the Mini cannot host this reliably.** Full narrative in `REASONING.md`'s 2026-07-19 (continued)
+entries; summary here for anyone picking this project up next.
+
+After a clean cold-restart test (machine was powered off between sessions; all six modules'
+persisted state — jars, RocksDB PState skeletons — survived intact on APFS, and Conductor +
+Supervisor auto-recovered all six to `RUNNING` without needing a redeploy), the plan was to
+right-size worker heap from `-Xmx4096m` to `-Xmx1536m` per module via `rama deploy --action update
+--configOverrides`, one module at a time, verifying the actually-applied heap in `supervisor.log`
+after each (not just trusting `moduleStatus: RUNNING`, per this session's own hard-won lesson about
+verifying claims against logs, not status codes).
+
+**Result: 1 of 6 succeeded (`EmailParsingModule`, confirmed genuinely serving at `-Xmx1536m`,
+verified by instance-ID match, not just log presence). `FamilySchemaModule`'s update — the
+foundational module, owning 15 PStates + 3 depots, the largest handover surface of any module —
+got stuck mid-handover (`UPDATE-PREPARE-HANDOVER` state, per its worker log) and was killed by
+Supervisor's ~30-second heartbeat watchdog. `moduleStatus` still reported `RUNNING` throughout,
+because it silently kept serving the OLD `-Xmx4096m` instance — a genuinely misleading signal that
+was only caught by comparing `appendTargetId` against the actual new instance ID, not by trusting
+the status string.** At the point this was caught, system free RAM had dropped to **73MB**, load
+average had climbed to **6.2** (idle baseline: 1.5), and the memory compressor held **10GB** —
+i.e., macOS was under real, active memory pressure while this was happening, not just running
+close to a hypothetical ceiling.
+
+**Working diagnosis (unconfirmed, logged as a hypothesis in `RAMA_VERIFIED_LEARNINGS.md`):** the
+RAM starvation and the handover failure are plausibly the same problem, not two separate ones — a
+heavy module's handover needs enough headroom to complete its RocksDB/task-state sync inside the
+watchdog window, and a machine already down to double-digit MB free under compressor pressure makes
+that sync slower, which makes it more likely to miss the window, which kills the new worker and
+leaves the module stuck on its old (also 4096m, also uncomfortable) instance. If true, this is a
+**loop that heap-tuning alone cannot escape on this hardware**: the fix for RAM pressure is itself
+handicapped by the RAM pressure.
+
+**Decision: stop the Mac Mini deploy here. Do not retry `FamilySchemaModule`, do not touch the
+remaining four modules (`EmailIngestionModule`, `GmailIngestionModule`, `DigestModule`,
+`QueryModule` — all still at `-Xmx4096m`).** All Rama daemons (ZooKeeper, Conductor, Supervisor,
+all six workers) were cleanly stopped (`SIGTERM`, confirmed exited, all ports 2000/1973/8889/3001-
+3007 clear) at the end of this session. `rama-data/` and all persisted state remain on disk,
+untouched — nothing was deleted. **The Mini deploy is considered a complete and valuable result on
+its own terms: it proved the six-module architecture deploys, runs, and survives a cold restart
+with data intact. It also proved the hardware itself (24GB RAM, six AOR-heavy modules) is
+undersized for comfortable operation, independent of any code defect.** Next step is a cloud VM
+sized with real headroom (six modules at a sane heap plus genuine margin for Gmail/LLM/ingestion
+load, not squeezed to the ceiling) — planned as a dedicated next session, not a continuation of this
+one. `worker-heap-overrides.yaml` (project root, `worker.child.opts: "-Xmx1536m"`) is still valid
+and reusable as a starting point on whatever platform hosts this next, though the target value
+should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
+a 24GB box.
+
+## Next Task (set 2026-07-29) — RSS measurement run: get the real number before buying or refactoring
+
+**This is a measurement session. No code changes, no refactoring, no consolidation work.** Its
+entire purpose is to replace an estimate with data. The 2026-07-19 "24GB is undersized, need 32GB"
+conclusion was arithmetic on summed `-Xmx` ceilings and has been retracted — `FamilySchemaModule`'s
+worker crash log shows G1 committed 352MB of a 4096MB ceiling and used 197MB of it. See
+`RAMA_VERIFIED_LEARNINGS.md` ("`-Xmx` is a ceiling, not a reservation") and `REASONING.md`
+(2026-07-29). Nobody has ever recorded RSS for a single worker in this project. Do that first.
+
+**Step 1 — baseline, at current defaults.** Start ZooKeeper + Conductor + Supervisor and all six
+modules on the Mini (procedure at the end of this file). Change nothing else — leave heap exactly as
+it currently is so the baseline is comparable to the 2026-07-19 deploy. **Let it idle 5–10 minutes**
+before recording, so JIT/metaspace/caches settle and the numbers aren't launch-transient.
+
+Record, per worker (all six) and per daemon (Conductor, Supervisor, ZooKeeper):
+- **RSS** — `ps -eo pid,rss,command | grep rama`. This is the number that matters. Map each PID to
+  its module via the `rpl.rama.distributed.daemon.worker <port> <ModuleName>` argv on its command
+  line; note the launched `-Xmx` and `-XX:MaxDirectMemorySize` alongside it.
+- **Total system memory** — `vm_stat` plus `top -l 1 -s 0 | head -12`: free pages, compressor size,
+  swap used, load average. The 2026-07-19 failure happened at 73MB free / 10GB compressor / load 6.2,
+  so capture the same fields to make the two sessions directly comparable.
+- Optionally per-worker heap vs. non-heap via `jcmd <pid> GC.heap_info` and `jcmd <pid> VM.native_memory`
+  (the latter needs `-XX:NativeMemoryTracking=summary` in `worker.child.opts` to work — only worth
+  adding if the RSS split turns out to be the interesting question).
+
+**Watch `FamilySchemaModule` vs. `DigestModule` specifically.** This comparison resolves an open
+question for free: `FamilySchemaModule` declares 15 PStates, `DigestModule` declares none, and
+RocksDB's default 256MB block cache has undocumented scope (per PState → ~3.8GB for FamilySchema;
+per worker → 256MB). If their RSS is comparable, the cache is effectively per-worker. If
+FamilySchema is GBs higher, it scales with PState count. Write the answer back into
+`RAMA_VERIFIED_LEARNINGS.md` — the entry is already staked out in the Unverified section.
+
+**Step 2 — apply the two free levers, re-measure.** Both are pure config, no code:
+1. **`worker.max.direct.memory.size`** — Rama defaults it to `500m` **per worker**, passed as
+   `-XX:MaxDirectMemorySize=500m` *in addition to* `-Xmx` (confirmed in the crash log's `jvm_args:`
+   line). `worker-heap-overrides.yaml` has never set it. Six workers × 500m = 3GB of ceiling nobody
+   chose. Set it below the default and re-measure.
+2. **`conductor.child.opts`** — defaults to `-Xmx1024m` for what is a pure coordination process.
+   Try `-Xmx512m`.
+
+Lever 1 goes in `worker-heap-overrides.yaml` and must be passed via `--configOverrides` on **every**
+module's deploy — config overrides are never inherited between deploys (verified, see
+`RAMA_VERIFIED_LEARNINGS.md`). Lever 2 goes in `~/rama-release/rama.yaml` and needs a Conductor
+restart. **Verify what actually applied** by grepping `supervisor.log`'s `Launching process` line —
+and remember that a `Launching process` line plus `moduleStatus: RUNNING` does NOT prove cutover;
+match `appendTargetId` against the new instance ID (both traps are documented in
+`RAMA_VERIFIED_LEARNINGS.md` and both have burned this project already).
+
+**Redeploy risk, carried over:** `FamilySchemaModule`'s update is the one that got stuck at
+`UPDATE-PREPARE-HANDOVER` and was watchdog-killed on 2026-07-19. If Step 2 needs a
+`FamilySchemaModule` redeploy and RSS headroom looks tight at that moment, take the baseline as the
+deliverable and stop — a stuck handover costs more than the lever saves. Baseline alone answers the
+sizing question.
+
+**What the outcome decides:**
+- Measured total comfortably under 16GB → the Mini (24GB) may be viable after all, or a modest cloud
+  box is; **consolidation is not needed** and the six-module architecture stands.
+- Measured total genuinely needs more → consolidation becomes the cheap alternative to paying 2.2–5×
+  budget. The **three-module split** is pre-audited and has clean seams (`FamilySchemaModule`
+  untouched / Gmail + EmailIngestion + EmailParsing / Digest + Query): no PState-ownership problem,
+  no `define()`-last problem, no agent name collisions, because all 4 depots and 15 PStates live in
+  `FamilySchemaModule` and the other five modules declare zero persistent state. Full assessment
+  including its real costs (consolidated blast radius; losing AOR agent history for merged-away
+  modules) is in `REASONING.md` (2026-07-29). **Do not start that refactor without the measurement.**
+
+Also settled this session so it isn't re-litigated: **multiple modules cannot share a worker JVM.**
+Verified at source (`terminology.html`: a Worker runs "part of **a module**") and at process level
+(the worker daemon takes exactly one module name as an argv). There is no deploy-config shortcut to
+fewer JVMs — merging code is the only route.
+
+---
+
+## Deferred — Multi-event extraction in `EmailParsingModule`
+
+*(Was "Next Task" until 2026-07-29; deferred behind the RSS measurement run above, not dropped.)*
+
+One email currently always yields
 exactly one event, even when it describes several distinct things (e.g. the zoo trip
 fixture bundles a permission slip deadline, a field trip, a picture day, and a pickup-time
 change into a single `SCHOOL_EVENT` record). This is the deferred half of the

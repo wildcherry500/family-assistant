@@ -2694,3 +2694,208 @@ survive real ingestion without either lowering per-worker heap or deciding light
 
 No Supervisor config changes, no Gmail/OAuth calls, no ingestion — session stops here, at the
 Part 2/Part 3 boundary, per instruction.
+
+## 2026-07-19 (continued) — Part 3 pre-restart: cold-restart persistence test, heap-tuning attempt, and the decision to abandon the Mini
+
+Fresh session (new window), audit-first per instruction. Machine had been powered off between
+sessions — no reboot uptime discontinuity was expected to matter since PState data lives on disk,
+not in daemon memory, but this was the first real test of that claim.
+
+**Cold-restart persistence test: passed cleanly.** With all daemons down (confirmed: zero Rama
+Java processes, ports 2000/1973/8889/1974 clear, `uptime` showing the machine had genuinely been
+off), `rama-data/` was inspected directly rather than assumed intact: `conductor/jars/` held all
+six module jars at their 2026-07-19 Part-2 timestamps, `objects/` held one RocksDB directory per
+module with every PState from `CLAUDE_HANDOFF.md`'s schema table present and structurally valid
+(`CURRENT`/`MANIFEST`/`IDENTITY`/`LOCK`/`OPTIONS` all in place). Zero `.sst` files and all-zero-byte
+WAL logs confirmed this was empty-because-ingestion-never-ran, correctly distinguished from
+empty-because-deploy-failed (Part 3/ingestion never got that far in Part 2). Starting ZooKeeper →
+Conductor → Supervisor in sequence, Conductor's own log immediately recreated state machines for
+all six modules at `[running]` from persisted disk state with zero errors, and Supervisor then
+auto-relaunched all six workers (matching Conductor's remembered target state) without any
+`rama deploy` command being run at all — genuine self-healing recovery, confirmed via matching
+`appendTargetId`s against the pre-restart instance IDs. All six auto-recovered at the old
+`-Xmx4096m` default, as expected (auto-recovery doesn't go through `--configOverrides`).
+
+**Heap right-sizing: user chose `-Xmx1536m`** (reasoning: frees ~13-14GB, above the ~1GB GC-thrash
+floor, tunable per-module later via `--configOverrides` if `QueryModule` specifically shows
+pressure). Two questions were sent to Chat-o-rama (chat.redplanetlabs.com) before grinding through
+six ~15-25-minute redeploys, both answered with doc citations:
+
+1. **Persistence**: `worker.child.opts` is a Rama "config" (not a "dynamic option" — those are a
+   separate, always-changeable mechanism via `set-launch-*-dynamic-option!` that explicitly doesn't
+   cover worker JVM settings). Per `rama-shared → "All configs"`, configs come from `rama.yaml`
+   (cluster-wide default), `--configOverrides` (per-deploy), or programmatic `RamaClusterManager`
+   construction — and are never persisted per-module, so a bare future redeploy without
+   `--configOverrides` reverts to whatever default applies. This directly **contradicted** this
+   project's own prior working theory (logged mid-session as "rama.yaml is inert") — the docs say
+   `rama.yaml` should work as a global default; this project's actual history (April deploy, the
+   2026-07-19 fresh six-module deploy, and tonight's auto-recovery — three separate real events)
+   shows `rama.yaml`'s `-Xmx2g` never once took effect, always falling back to `-Xmx4096m` instead.
+   Rather than resolve this by more live trial-and-error mid-session, it was deliberately filed as
+   an open investigation in `RAMA_VERIFIED_LEARNINGS.md` with a concrete isolated-test plan for a
+   future dedicated session, with the leading hypothesis being a programmatic-`RamaClusterManager`-
+   path vs. CLI-`rama deploy`-path distinction that the docs don't spell out.
+2. **Efficiency**: no config-only update path exists — `--action update` always requires `--jar`
+   and always performs a full module-instance transition, confirmed via
+   `rama-shared → "Operating Rama clusters" → "Updating modules"`. The ~15-25 min/module cost is
+   real and not something to optimize away; the same JAR can be reused (no rebuild needed since code
+   is unchanged) but the upload + coordinated worker-swap is unavoidable.
+
+**Redeploy execution — this is where the real finding landed.** `FamilySchemaModule` was updated
+first (dependency order). Verification at the time checked `moduleStatus: RUNNING` plus a
+`supervisor.log` grep showing a `Launching process` line with `-Xmx1536m` — and was reported to the
+user as confirmed. **This was wrong, caught only on a later, more careful check prompted by the
+user asking for a free-RAM readout before continuing.** Comparing `moduleStatus`'s `appendTargetId`
+against the actual new instance ID (rather than just checking the status string and the existence
+of a launch-attempt log line) revealed `FamilySchemaModule` was still serving its ORIGINAL instance
+(`55b3c805-...`, port 3001, `-Xmx4096m`) — the new instance (`ada41606-...`, port 3007,
+`-Xmx1536m`) had gotten stuck at the `UPDATE-PREPARE-HANDOVER` state-machine stage (per its own
+worker log, which simply stops mid-sequence with no further lines) and was killed by Supervisor's
+heartbeat watchdog 36 seconds after starting (`supervisor.log`: "Port 3007 heartbeat is no longer
+valid, moving to KILLING"). `moduleStatus` reported `RUNNING` the entire time this was happening,
+because the module never stopped serving — it just never cut over, which made the earlier
+"confirmed" report false despite following the mandated grep-verify step. The grep step alone was
+insufficient; verifying the *serving* instance ID, not just the *most recent launch attempt*, is
+the actually-sufficient check, and is now the corrected standing practice.
+
+`EmailParsingModule`'s update, run immediately after, DID succeed genuinely — confirmed via
+matching `appendTargetId` to its new instance (`e4e90fad-...`) and confirmed alive and actively
+processing 19+ minutes later (only `WARN`-level "task thread event took excessive time" entries, no
+errors). **So the real count was 1 of 6 successfully converted, not 2** as originally reported.
+
+**Working diagnosis for why `FamilySchemaModule` specifically failed:** it owns far more PState/
+depot surface than any other module (15 PStates + 3 depots vs. one agent + a couple of AOR-internal
+depots for the others), so its handover has proportionally more RocksDB/task-state work to complete
+inside Supervisor's ~30-second heartbeat window. At the exact moment this happened, `top`/`vm_stat`
+showed **73MB free system memory, load average 6.2 (vs. an idle baseline of 1.5), and a 10GB memory
+compressor** — real, active OS-level memory pressure, not a hypothetical ceiling. The hypothesis
+(explicitly unconfirmed, no controlled A/B test run) is that RAM starvation and the handover
+timeout are the same problem: less headroom makes the heavy module's sync slower, which makes it
+more likely to miss the watchdog window, which kills the new worker and leaves the module stuck on
+its old (also-uncomfortable) instance — a loop that heap-tuning alone cannot break, because the fix
+itself needs the headroom it's trying to create.
+
+**Decision (user's call, made explicitly rather than continuing to grind): abandon the Mac Mini
+deploy, do not retry `FamilySchemaModule`, do not touch the remaining four modules
+(`EmailIngestionModule`, `GmailIngestionModule`, `DigestModule`, `QueryModule` — all still at
+`-Xmx4096m`, untouched).** Rationale: `QueryModule`, the next module in line, carries the same or
+higher risk profile as `FamilySchemaModule` (two agents, previously the slowest module under
+deploy-time churn even before RAM pressure became this severe) — continuing to grind through
+updates on a machine already showing 73MB free and a failed handover was judged more likely to
+produce more failures than progress. The Mini deploy is treated as a complete, valuable result on
+its own terms: it proved the six-module architecture deploys correctly, all modules run, and state
+survives a cold restart intact — and it also proved, empirically rather than by inference, that
+24GB is undersized for six AOR-heavy modules running comfortably together, independent of any code
+defect. `CLAUDE_HANDOFF.md` updated with the full decision record. All Rama daemons (ZooKeeper,
+Conductor, Supervisor, all six workers — 9 processes total, enumerated by PID before shutdown) were
+stopped cleanly via `SIGTERM`, confirmed exited, all relevant ports (2000, 1973, 8889, 3001-3007)
+confirmed clear. `rama-data/` and all persisted state left untouched on disk. Next session: design
+a cloud deployment sized with genuine headroom, as a dedicated planning session, not a continuation
+of tonight's attempt.
+
+## 2026-07-29 — Host-hunt dead end, and the sizing number that turned out to be wrong
+
+### The pricing wall that started this
+The plan coming out of 2026-07-19 was "rent a cloud VM with real headroom" — read at the time as a
+32GB box, for roughly the ~$30/mo the project budgets. That is not purchasable right now:
+
+| Option | Price | Note |
+|---|---|---|
+| Hetzner CX / CAX Cost-Optimized | — | **Sold out EU-wide.** Not a queue-and-wait; unavailable. |
+| Hetzner dedicated auction, cheapest 32GB | **$66.90/mo** | ~2.2× budget |
+| Hetzner CPX, 32GB | **$152.99/mo** | ~5× budget |
+
+So the three options on the table were: pay 2.2–5× budget, refactor six modules into two or three to
+cut per-JVM overhead, or re-examine whether 32GB was ever the right number. Took the third first,
+because it's free and it gates the other two.
+
+### The 32GB requirement was arithmetic on ceilings
+It did not survive contact with the evidence. `hs_err_pid19834.log` — the real `FamilySchemaModule`
+worker's crash log, sitting in the project root the whole time — shows that worker launched at
+`-Xmx4096m` and running with:
+
+```
+garbage-first heap   total 352256K, used 196606K
+Metaspace       used 290453K, committed 291968K
+```
+
+**G1 committed 352MB of a 4096MB ceiling and used 197MB of it.** The "six workers × 4096m = 24GB, so
+24GB is undersized, so buy 32GB" chain was summing `-Xmx` values, and `-Xmx` is a ceiling the JVM
+never reserved. Recorded as a verified entry in `RAMA_VERIFIED_LEARNINGS.md`.
+
+**Precise correction to the 2026-07-19 decision record, because it overstated its own evidence.**
+That entry claims the Mini deploy "proved, empirically rather than by inference, that 24GB is
+undersized." Two claims were tangled there and only one holds:
+- **Holds:** the memory pressure was real and directly measured — 73MB free, load average 6.2 vs.
+  1.5 idle, 10GB compressor. Something genuinely ran out of room, and `FamilySchemaModule`'s
+  handover genuinely died in the watchdog window.
+- **Does not hold:** that this establishes a 32GB requirement. That step was inference from summed
+  ceilings, and it is the step being retracted. The real fixed per-JVM cost looks like metaspace
+  ~290MB plus code cache/stacks/GC metadata plus Netty direct buffers — ≈500–700MB per worker — not
+  4GB. Six of those is ~3–4GB of fixed overhead, not 24GB.
+
+Worth being blunt about the failure mode, since it cost a session and nearly cost 5× budget: the
+number was never measured. Nobody recorded RSS for a single worker across the entire Mini deploy.
+The pressure was real, so the conclusion drawn from it felt validated, and a plausible arithmetic
+chain went unchallenged because its output agreed with the symptom.
+
+### Decision: measure before buying, and before refactoring
+**Measure actual RSS first.** Neither spending 2.2–5× budget nor refactoring six modules is
+justified by a number computed from `-Xmx` sums. The next session starts the daemons and all six
+modules on the Mini, lets them idle, and records real RSS per worker — see `CLAUDE_HANDOFF.md`.
+Two free levers get applied and re-measured in the same run: `worker.max.direct.memory.size` (Rama
+defaults it to 500m *per worker*, passed as `-XX:MaxDirectMemorySize=500m` on top of `-Xmx`, and our
+`worker-heap-overrides.yaml` has never set it) and `conductor.child.opts` (defaults to `-Xmx1024m`
+for a pure coordination process).
+
+One unresolved term could still move the answer: RocksDB's default 256MB block cache, whose scope —
+per PState, per partition, or per worker — is genuinely undocumented, and which spans 256MB to
+~3.8GB for `FamilySchemaModule`'s 15 PStates. It is off-heap, so it is invisible in the heap figures
+above. Logged in `RAMA_VERIFIED_LEARNINGS.md`'s Unverified section; the RSS run resolves it as a
+side effect by comparing `FamilySchemaModule` (15 PStates) against `DigestModule` (0).
+
+### Consolidation stays a live fallback, and it is cheaper than expected
+Audited it rather than assuming, in case measurement says the RAM need is real. Verified at source
+that **multiple modules cannot share a worker JVM** — `terminology.html` defines a Worker as "a
+process launched by a Supervisor to run part of **a module**", and a module's depots/PStates/
+topologies "all run colocated inside the same set of processes / threads". Colocation exists; its
+boundary is the module. Confirmed at process level from our own `supervisor.log`: the worker daemon
+takes exactly one module name as an argv (`rpl.rama.distributed.daemon.worker 3001
+FamilySchemaModule`), six ports for six modules. The isolation-scheduler language about workers
+sharing "nodes" is about machines, not JVMs. **So fewer JVMs requires merging code — there is no
+deploy-config shortcut.**
+
+The **three-module split has clean seams**: `FamilySchemaModule` untouched /
+Gmail + EmailIngestion + EmailParsing / Digest + Query. What makes it cheap is a fact confirmed by
+grep: **all 4 depots and all 15 PStates live in `FamilySchemaModule`**, and the other five modules
+declare zero persistent state of their own. Consequences:
+- **No PState-ownership problem.** `FamilySchemaModule` keeps sole write ownership via its own
+  stream topologies; nothing moves, so the `IllegalWriteException` class of failure never arises.
+- **No `define()`-last problem.** That rule only binds a module that implements `RamaModule`
+  directly and builds agents via `AgentTopology.create(setup, topologies)` … `agentTopology.define()`.
+  Leave `FamilySchemaModule` agent-free and no module needs the manual route — all merged modules
+  stay `AgentModule` subclasses with `defineAgents()`.
+- **No agent name collisions.** All six agent names are distinct, and the only duplicated agent
+  object key (`gemini-model`, declared in both `EmailParsingModule` and `QueryModule`) lands in
+  *different* modules under this split. The two-module split is where it collides and the two
+  builders must be reconciled.
+- Cross-module calls have documented same-module equivalents: `getMirrorAgentClient(m, a)` →
+  `getAgentClient(a)`; `getMirrorStore`/`getMirrorDepot` into `FamilySchemaModule` stay as they are.
+
+**Its real costs**, neither of which is a blocker but both of which are genuine:
+1. **Consolidated blast radius.** Today a `GmailIngestionModule` OOM cannot touch parsing. Merged,
+   one worker's heap pressure takes down the whole ingestion path. This is the actual price of the
+   RAM saving.
+2. **Losing AOR agent history for merged-away modules.** Merging means `rama destroyModule` on the
+   absorbed modules, and per the verified depot/PState destruction rule an undeclared object is
+   destroyed with its partitions deleted from disk. Each carries ~77–100MB of Agent-o-rama-internal
+   replog/trace state (measured: `rama-data/task-threads/*`). **No business data is at risk** —
+   it all lives in `FamilySchemaModule`, which would only ever be `--action update`d, never renamed;
+   all six modules already return their plain class name from `getModuleName()`, so identity and
+   data survive an in-place update.
+
+Incidental: merging removes the `getMirrorAgentClient` calls where `ZooEmailTest`'s 100%-reproducible
+`Executor pool is shut down` failure originates, so that may resolve as a side effect.
+
+Nothing was built or deployed this session — audit and documentation only, by request. The
+consolidation assessment is read from code and docs; none of it has been exercised by a test.
