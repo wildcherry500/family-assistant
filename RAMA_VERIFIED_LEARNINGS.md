@@ -505,8 +505,118 @@ Working estimate: **≈500–700MB fixed per worker, independent of workload.** 
 not a measured RSS profile of six healthy workers. The estimate is superseded the moment real RSS
 is recorded; that measurement is the next session's task (see `CLAUDE_HANDOFF.md`).
 
+**SUPERSEDED 2026-07-30 by the actual RSS measurement run.** Six healthy workers were measured on a
+clean, settled floor: the real figure is **866–1076MB per worker**, not 500–700MB. The estimate was
+low by roughly 50%. The *direction* of the `-Xmx` finding held completely — see
+"`-Xmx` ceiling ratio vs. RSS ratio, measured" below for the direct measurement that replaces this
+entry's extrapolation.
+
 **Rule going forward: size worker RAM from measured RSS, never from summed `-Xmx`.** A `-Xmx`
 value's job is to cap a runaway, not to declare a footprint.
+
+---
+
+### RocksDB's 256MB block cache is per WORKER, not per PState — measured
+Verified 2026-07-30 (Step 0 RSS measurement run). **This resolves the OPEN QUESTION previously
+logged in the Unverified section**, which has been removed from that section accordingly. It was
+resolved exactly as that entry proposed — empirically, from measured RSS, without needing a doc
+answer.
+
+The decisive comparison, both settled and plateaued on a clean floor:
+
+| Module | PStates | -Xmx | Settled RSS |
+|---|---|---|---|
+| `FamilySchemaModule` | **15** | 4096m | **865.6 MB** ← *smallest worker* |
+| `DigestModule` | **0** | 4096m | **1011.3 MB** ← *larger* |
+
+**`FamilySchemaModule`, with 15 PStates, is 146MB SMALLER than the module with zero PStates.** At
+per-PState scope it would have carried roughly 3.8GB of extra block cache; it carries none. The
+per-PState and per-partition readings are both eliminated. The cache is effectively per worker.
+
+Corroborating: all six workers land in a tight **866–1076MB** band despite PState counts spanning 0
+to 15, with the two extremes of PState count sitting at opposite ends of the band *in the opposite
+direction* from what per-PState scaling predicts. **Worker RSS is dominated by fixed JVM + Rama +
+Metaspace overhead, not by PState count.**
+
+Consequence: the ~3.8GB term flagged as able to invalidate the fixed-cost estimate does not exist,
+and box sizing no longer needs to reserve for it. It also means module *consolidation* saves the
+duplicated fixed cost (~866MB+ per worker) rather than any PState-proportional cost.
+
+---
+
+### `-Xmx` ceiling ratio vs. RSS ratio, measured — a 2.7× ceiling difference produced ~11% RSS difference
+Verified 2026-07-30 (Step 0 RSS measurement run). This is the direct measurement behind the
+`-Xmx`-is-a-ceiling entry above, which until now rested on a single crash-log extrapolation.
+
+| Module | Launched `-Xmx` | Settled RSS |
+|---|---|---|
+| `EmailParsingModule` | **1536m** | 956.1 MB |
+| `GmailIngestionModule` | **4096m** | 1076.2 MB |
+
+**2.67× the ceiling bought 12.6% more resident memory.** Two workers, same classpath, same
+`MaxDirectMemorySize=500m`, differing only in ceiling. This is what "a ceiling does not reserve or
+predict a footprint" looks like in measured numbers.
+
+**Practical consequence: tuning `-Xmx` downward is a near-worthless RAM-reduction lever.** Dropping
+five workers from 4096m to 1536m would reclaim on the order of 100MB each, not 2.5GB each. Do not
+plan a memory reduction around it, and do not accept the redeploy risk of an `--action update`
+purely to change `-Xmx`.
+
+---
+
+### Measurement contamination: compressed pages understate RSS by ~2× — always measure from a settled, uncontaminated floor
+Verified 2026-07-30 (Step 0 RSS measurement run). Recorded because this nearly corrupted the
+measurement it was meant to produce, and the mechanism will recur on any long-running box.
+
+When a process's pages are compressed by macOS under memory pressure, **they stay compressed** until
+touched again. Reading RSS from a process that lived through a pressure event therefore reports the
+*post-compression* figure, not the true working set. Measured on the same processes, same machine,
+same day:
+
+| Process | RSS, cluster up through the pressure period | RSS, clean restart on a settled floor |
+|---|---|---|
+| ZooKeeper | 413.4 MB | **812.8 MB** |
+| Conductor | 493.9 MB | 768.7 MB |
+| Supervisor | 508.8 MB | 753.0 MB |
+
+**ZooKeeper read at ~51% of its true footprint.** Every daemon was understated the same way. A
+sizing decision taken from the contaminated readings would have undersized the box by roughly a
+factor of two on the daemon tier.
+
+**Procedure that produces a trustworthy number** (this is the sequence that was actually run):
+1. Shut down everything being measured — `rama shutdownCluster`, then SIGTERM supervisor → conductor
+   → ZooKeeper in that order. Verify `pgrep -f java` returns 0.
+2. Take the floor reading, and **confirm it is settled, not still draining**. Sample repeatedly:
+   compressor and free must be flat. Watch for background work — a Spotlight (`mds_stores`) reindex
+   triggered by the data churn moved free memory by 2.4GB after shutdown, and was only distinguished
+   from a real floor by sampling until it showed **0.0% CPU** with flat free/compressor.
+3. Restart, settle 10 minutes, then measure. Confirm RSS has plateaued across samples before reading.
+
+**Also note:** low free memory alone is not the failure signal. The 2026-07-19 failure signature was
+a **10GB compressor** with load 6.2. A healthy settled cluster showed free at 0.25GB with 9.63GB
+*inactive* (reclaimable), 0.00M swap, and the compressor flat at 2.12GB — low free, but no pressure.
+Read the compressor and swap, not free.
+
+---
+
+### Rama's three daemons cost ~2.33GB before any module loads
+Verified 2026-07-30 (Step 0 RSS measurement run), settled clean-floor figures:
+
+| Daemon | `-Xmx` | Settled RSS |
+|---|---|---|
+| ZooKeeper (`devZookeeper`) | — | 812.8 MB |
+| Conductor | 1024m | 768.7 MB |
+| Supervisor | 1024m | 753.0 MB |
+| **Total** | | **≈2.33 GB** |
+
+That is roughly **39% of the ~6GB measured idle footprint**, spent before a single module runs — a
+fixed tax on any single-node deployment.
+
+**This makes `conductor.child.opts` the highest-value untried lever in the project.** The Conductor
+is a pure coordination process holding 768.7MB against a 1024m ceiling; Rama's default is
+`-Xmx1024m`. Still never applied. Per the ceiling-vs-RSS entry above, expect the gain to be modest
+rather than proportional — but unlike `-Xmx` on workers, this one costs no redeploy risk to try.
+`worker.max.direct.memory.size` (500m × 6 = 3GB of ceiling above `-Xmx`) likewise remains unset.
 
 ---
 
@@ -549,7 +659,17 @@ programmatic-vs-CLI-path hypothesis is confirmed. Do not run this test opportuni
 different task's redeploy — it needs to be the one deliberate variable changed, isolated from
 whatever redeploy work is otherwise in progress.
 
-### OPEN QUESTION: is RocksDB's 256MB block cache per PState, per partition, or per worker?
+### ~~OPEN QUESTION: is RocksDB's 256MB block cache per PState, per partition, or per worker?~~ — RESOLVED 2026-07-30, MOVED TO VERIFIED
+**Answer: per worker.** Resolved empirically by the Step 0 RSS measurement run, exactly as the
+"how to resolve it cheaply" note below proposed — `FamilySchemaModule` (15 PStates) settled at
+865.6MB, *smaller* than `DigestModule` (0 PStates) at 1011.3MB. See
+**"RocksDB's 256MB block cache is per WORKER, not per PState — measured"** in the Verified section.
+
+The original entry is retained below for its doc citations and its reasoning, which were sound and
+led to the correct experiment. It is no longer an open question and must not be treated as one.
+
+---
+
 Logged 2026-07-29 (RAM-reduction audit session). Kept in the Unverified section deliberately —
 this file's own rule is never to mix verified and unverified items, and this one could not be
 resolved from the docs.

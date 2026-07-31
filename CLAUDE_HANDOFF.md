@@ -542,7 +542,99 @@ and reusable as a starting point on whatever platform hosts this next, though th
 should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
 a 24GB box.
 
-## Next Task (set 2026-07-29) — RSS measurement run: get the real number before buying or refactoring
+## Next Task (set 2026-07-30) — Load testing under real ingestion; box sizing stays deferred
+
+**Step 0 is DONE. Its number is ~6GB idle — and "idle" is why this session exists.** The measured
+figure has no app running, no ingestion, no LLM calls, no depot appends. It is a floor for the
+cluster, not a working figure. **Do not provision a box on it.**
+
+**Prerequisites, both of which are real gates, not formalities:**
+1. **OAuth re-auth** — browser consent, requires Tor's hands. Cannot be automated from a session.
+2. **Gemini cost gate** — backlog count first, then Tor's explicit sign-off on projected spend
+   before any real ingestion runs. This gate exists because ingestion volume drives LLM cost
+   directly.
+
+**What to measure, once ingestion is actually flowing:** the same fields as Step 0 — per-worker RSS,
+per-daemon RSS, and system totals (free, **compressor**, swap, load) — but under load rather than at
+idle, and sampled over time rather than once. The delta between the ~6GB idle floor and the loaded
+peak is the number that sizes the box.
+
+**Measure from a clean, settled floor.** Step 0 nearly produced a wrong answer because compressed
+pages understate RSS by ~2× (ZooKeeper read 413MB contaminated vs 813MB clean). The full procedure —
+shut down, verify `pgrep -f java` = 0, confirm the floor is settled and not still draining, restart,
+settle 10 min, confirm RSS has plateaued — is recorded in `RAMA_VERIFIED_LEARNINGS.md`
+("Measurement contamination"). Follow it; do not shortcut it.
+
+**Read the compressor, not free memory.** Low free is normal macOS behavior. The 2026-07-19 failure
+signature was a **10GB compressor** at load 6.2. A healthy settled cluster showed 0.25GB free with
+9.63GB reclaimable inactive, 0.00M swap, and a flat 2.12GB compressor — that is not pressure.
+
+**Highest-value lever to try, and it is cheap:** `conductor.child.opts`. The three daemons cost
+**2.33GB — ~39% of the idle total — before a single module loads**, with Conductor at 768.7MB
+against a 1024m ceiling. Unlike worker `-Xmx`, changing it needs only a Conductor restart, no
+redeploy, no `UPDATE-PREPARE-HANDOVER` risk. `worker.max.direct.memory.size` (500m × 6 = 3GB of
+unchosen ceiling) is still unset too, but that one does require a redeploy on every module.
+
+**Do NOT bother tuning worker `-Xmx` for RAM.** Measured: 2.67× of ceiling bought 12.6% of RSS.
+Dropping five workers from 4096m to 1536m reclaims ~100MB each, not 2.5GB each — not worth a
+redeploy. Note the `--configOverrides` trap has already fired: five of six workers currently run at
+the 4096m default, only `EmailParsingModule` at 1536m. **This was left unfixed deliberately** and
+should stay that way unless a redeploy is happening for another reason.
+
+**Consolidation is not needed on current evidence** and should not be started. ~6GB idle against a
+24GB Mini is not a squeeze. The three-module split stays pre-audited and available as a fallback if
+loaded numbers say otherwise; its assessment is in `REASONING.md` (2026-07-29).
+
+---
+
+## COMPLETED (2026-07-30) — RSS measurement run: Step 0 executed, ~6GB idle measured
+
+**Outcome, measured on a clean settled floor:**
+
+| | PhysMem used | Unused |
+|---|---|---|
+| Floor — Rama down, IntelliJ gone, settled | ~17 GB | 6458 MB |
+| Cluster up, settled, idle | ~23 GB | 128–345 MB |
+| **Measured Rama footprint (idle)** | **~6 GB** | |
+
+Sum-of-RSS reads 8.03GB but double-counts pages shared across nine JVMs on an identical classpath;
+**~6GB is the honest figure.** Settled per-process RSS:
+
+| Process | Port | `-Xmx` | PStates | RSS |
+|---|---|---|---|---|
+| GmailIngestionModule | 3004 | 4096m | — | 1076.2 MB |
+| QueryModule | 3006 | 4096m | — | 1034.3 MB |
+| DigestModule | 3005 | 4096m | **0** | 1011.3 MB |
+| EmailIngestionModule | 3003 | 4096m | — | 1006.8 MB |
+| EmailParsingModule | 3007 | **1536m** | — | 956.1 MB |
+| FamilySchemaModule | 3001 | 4096m | **15** | **865.6 MB** |
+| ZooKeeper | — | — | — | 812.8 MB |
+| Conductor | — | 1024m | — | 768.7 MB |
+| Supervisor | — | 1024m | — | 753.0 MB |
+
+**Results against what this session set out to decide:**
+- **24GB ceiling-arithmetic figure: retracted against measurement.** The ~9.5GB hypothesis was
+  slightly conservative — right direction, right order of magnitude.
+- **RocksDB block cache: per WORKER, resolved.** `FamilySchemaModule` (15 PStates) is *smaller*
+  than `DigestModule` (0 PStates). The ~3.8GB unknown does not exist. Moved to Verified.
+- **`-Xmx` is a ceiling: now measured**, not extrapolated. 2.67× ceiling → 12.6% RSS.
+- **Measurement contamination discovered and documented** — compressed pages understate RSS ~2×.
+- **Box sizing: still deferred**, because ~6GB is idle. See the Next Task above.
+
+All four findings are written up as verified entries in `RAMA_VERIFIED_LEARNINGS.md`; the reasoning
+and caveats are in `REASONING.md` (2026-07-30).
+
+**Caveats that must travel with the ~6GB number:** it is idle-only, and the floor retained 1.78GB of
+non-Rama compressor state, making the subtraction slightly generous to Rama.
+
+**Operational notes learned:** `rama shutdownCluster` persists a `cluster-shutdown-complete` state in
+ZooKeeper, so `conductorReady` reads `false` after restart until a Supervisor registers — it clears
+itself, `forceClusterOpen` is not needed. `devZookeeper` listens on **port 2000**, not 2181.
+`rama moduleStatus` takes the short module name as a **positional** arg (no `--module` flag). All six
+modules restored from disk with no redeploy, `RUNNING` with `appendTargetId == readTargetId`.
+
+<details>
+<summary>Original 2026-07-29 task specification (retained for its reasoning)</summary>
 
 **This is a measurement session. No code changes, no refactoring, no consolidation work.** Its
 entire purpose is to replace an estimate with data. The 2026-07-19 "24GB is undersized, need 32GB"
@@ -612,11 +704,14 @@ Verified at source (`terminology.html`: a Worker runs "part of **a module**") an
 (the worker daemon takes exactly one module name as an argv). There is no deploy-config shortcut to
 fewer JVMs — merging code is the only route.
 
+</details>
+
 ---
 
 ## Deferred — Multi-event extraction in `EmailParsingModule`
 
-*(Was "Next Task" until 2026-07-29; deferred behind the RSS measurement run above, not dropped.)*
+*(Was "Next Task" until 2026-07-29; deferred behind the RSS measurement run, not dropped. That run
+completed 2026-07-30 — this now sits behind the load-testing session that succeeded it.)*
 
 One email currently always yields
 exactly one event, even when it describes several distinct things (e.g. the zoo trip

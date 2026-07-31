@@ -2899,3 +2899,106 @@ Incidental: merging removes the `getMirrorAgentClient` calls where `ZooEmailTest
 
 Nothing was built or deployed this session — audit and documentation only, by request. The
 consolidation assessment is read from code and docs; none of it has been exercised by a test.
+
+---
+
+## 2026-07-30 — Step 0 executed: the measured idle footprint is ~6GB, and the 24GB figure is dead
+
+Ran the RSS measurement that Step 0 of `LUMINO_MASTER_SEQUENCE.md` was blocking on. This is the
+session that replaces estimate with data. Nothing was deployed, redeployed, or refactored.
+
+### The measurement had to be re-baselined before it was worth anything
+
+The first attempt was contaminated and would have produced a wrong answer in the *dangerous*
+direction. Worker RSS was being read from a cluster that had lived through the memory-pressure
+period — and macOS keeps compressed pages compressed until they are touched again. Those processes
+were reporting their post-compression size, not their working set.
+
+The size of the error, same processes, same machine, same day: **ZooKeeper read 413.4MB
+contaminated vs 812.8MB clean — 51% of its true footprint.** Conductor and Supervisor were
+understated the same way. Sizing a box from the contaminated numbers would have undersized the
+daemon tier roughly twofold, and the error would have been invisible, because the numbers looked
+plausible and self-consistent.
+
+So the sequence was: shut the cluster down → take a true floor with IntelliJ gone and Rama fully
+down (`pgrep -f java` = 0) → restart → settle → measure. The floor also had to be *verified settled
+rather than still draining*: a Spotlight (`mds_stores`) reindex, almost certainly triggered by the
+Rama data churn, moved free memory by 2.4GB after shutdown. It was distinguished from a genuine
+floor only by sampling until it showed 0.0% CPU with free and compressor flat.
+
+**This is the same failure mode as the 2026-07-29 near-miss, one level down.** That one was
+"a plausible calculation that matches an observed symptom is still not a measurement." This one is
+"a measurement taken from a contaminated instrument is still not a measurement." The general rule:
+before trusting a number, check the *instrument*, not just the arithmetic.
+
+### The number
+
+| | PhysMem used | Unused |
+|---|---|---|
+| Floor — Rama down, IntelliJ gone, settled | ~17 GB | 6458 MB |
+| Cluster up, settled, idle | ~23 GB | 128–345 MB |
+| **Measured Rama footprint** | **~6 GB** | |
+
+Sum-of-RSS across the nine JVMs reads **8.03GB**, but that double-counts pages shared between nine
+processes running an identical `rama.jar` + `lib/` classpath. **~6GB is the honest figure**;
+8.03GB is a ceiling on it.
+
+**This retracts the 24GB ceiling-arithmetic figure definitively** — not as a reasoning error this
+time, but against measurement. And it **validates the ~9.5GB hypothesis as slightly conservative**,
+which is the right direction for a hypothesis to be wrong in. The hypothesis was extrapolated from
+one crash-log snapshot of one module; it landed within ~60% of a nine-process measured total. Worth
+recording that the extrapolation was *directionally sound* — the error in the 2026-07-29 session was
+never the ~9.5GB estimate, it was the 24GB sum.
+
+### Two caveats that keep this honest
+
+1. **This is an IDLE figure.** No app running, no ingestion, no LLM calls, no depot appends. It is a
+   floor for the cluster, not a working figure. Load testing requires real ingestion, which requires
+   OAuth re-auth and the Gemini cost gate — its own session. **Do not buy a box on this number.**
+2. **The floor retained 1.78GB of non-Rama compressor state** left over from the pressure period —
+   pages belonging to other applications that were never touched again. A true cold-boot floor would
+   be lower, which means the ~6GB subtraction is **slightly generous to Rama**. The bias is in the
+   safe direction, but it is real and it is not quantified.
+
+### What the measurement resolved for free
+
+`FamilySchemaModule` (15 PStates) settled at **865.6MB — the smallest worker.** `DigestModule`
+(0 PStates) settled at **1011.3MB — larger.** That single comparison kills the RocksDB block-cache
+question that had been sitting in `RAMA_VERIFIED_LEARNINGS.md`'s Unverified section as the one term
+able to invalidate the whole sizing: at per-PState scope `FamilySchemaModule` would have carried
+~3.8GB of extra cache. It carries none, and is 146MB *smaller* than the zero-PState module. **The
+cache is per worker.** All six workers sit in an 866–1076MB band regardless of PState count.
+
+Also measured: `EmailParsingModule` at `-Xmx1536m` uses 956.1MB while `GmailIngestionModule` at
+`-Xmx4096m` uses 1076.2MB — **a 2.67× ceiling difference producing 12.6% more RSS.** The
+`-Xmx`-is-a-ceiling finding now rests on a direct measurement rather than a single crash log.
+
+Both are recorded as verified entries in `RAMA_VERIFIED_LEARNINGS.md`.
+
+### What this changes about the plan
+
+- **Box sizing is deferred, not decided.** ~6GB idle suggests 16GB is ample and 32GB was never
+  indicated — but per caveat 1, the decision waits for a loaded figure. The value of Step 0 was
+  never "pick a box," it was "stop picking a box from arithmetic."
+- **`-Xmx` tuning is demoted to near-worthless as a RAM lever.** 2.67× of ceiling bought ~13% of
+  RSS. Dropping five workers to 1536m reclaims ~100MB each, not 2.5GB each — not worth an
+  `--action update`'s redeploy risk. The `--configOverrides` trap had in fact already fired (five of
+  six workers were running at the 4096m default, only `EmailParsingModule` at 1536m), and it was
+  deliberately **not** fixed: Step 0 needs no redeploy, and the measurement shows fixing it would
+  barely move the number.
+- **`conductor.child.opts` is promoted to the highest-value untried lever.** The three daemons cost
+  **2.33GB — ~39% of the idle total — before a single module loads.** Conductor is a pure
+  coordination process sitting at 768.7MB. Unlike worker `-Xmx`, trying it costs no redeploy risk.
+- **Consolidation's payoff is now confirmed to be the right target.** The 2026-07-29 audit reasoned
+  that merging modules eliminates *duplicated fixed per-worker cost* rather than PState-proportional
+  cost. The measurement confirms exactly that: cost is fixed-per-worker (~866MB+ floor), and does
+  not scale with PStates. Consolidation remains a fallback, and its arithmetic is now real.
+
+### Process note
+
+The cluster came back cleanly with no redeploy — all six modules restored from disk state,
+`moduleState: RUNNING` with `appendTargetId == readTargetId` on all six, satisfying the project's
+own "RUNNING does not prove a cutover" rule. One operational discovery: `rama shutdownCluster`
+persists a `cluster-shutdown-complete` state in ZooKeeper, so `conductorReady` reports `false` after
+restart until a Supervisor registers. It clears on its own; `forceClusterOpen` is not needed. Also
+noted: `devZookeeper` listens on **port 2000**, not the ZooKeeper default 2181.
