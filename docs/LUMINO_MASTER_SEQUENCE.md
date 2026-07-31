@@ -44,11 +44,65 @@ was sized to came from ceiling arithmetic that has since been retracted. See
 **"Measure before sizing"** at the end of this file. Both product tracks are blocked on
 the same infrastructure, and that infrastructure is now blocked on one measurement.
 
+**Updated 2026-07-30:** that measurement (Step 0) is **done — ~6GB idle.** The 24GB
+figure is retracted against real numbers and consolidation is off the table for RAM
+reasons. But ~6GB is an *idle* floor, so the box question is still open: it now waits on
+**load testing under real ingestion (Step 0b)**, not on Step 0. The shape of the block
+is unchanged — one measurement still gates both product tracks — but it is a different,
+better-specified measurement than it was yesterday.
+
 ---
 
 ## The sequence
 
-### Step 0 — Measure actual RSS (do this first; it sizes everything downstream)
+### Step 0 — Measure actual RSS ✅ **COMPLETE (2026-07-30)**
+
+**Result: ~6GB measured idle footprint.** 23GB used with the cluster up, minus a
+17GB clean floor taken with IntelliJ gone and Rama fully down. Sum-of-RSS reads
+8.03GB but double-counts pages shared across nine JVMs on an identical
+classpath, so **~6GB is the honest figure.**
+
+**What it decided, and what it did not:**
+
+- **The 24GB ceiling-arithmetic figure is retracted against measurement**, not
+  just against reasoning. The ~9.5GB hypothesis was slightly conservative —
+  right direction, right order of magnitude.
+- **Box sizing is DEFERRED, not decided.** ~6GB is an *idle* number: no app
+  running, no ingestion, no LLM calls, no depot appends. It is a floor for the
+  cluster, not a working figure. **Do not provision against it.** Sizing waits
+  on load testing, which is gated on OAuth re-auth and the Gemini cost gate.
+- **Consolidation is OFF THE TABLE for RAM reasons.** ~6GB against a 24GB Mini
+  is not a squeeze. The three-module split stays pre-audited in `REASONING.md`
+  (2026-07-29) as a fallback if loaded numbers ever say otherwise, but there is
+  no memory case for starting that refactor. Do not start it.
+- **RocksDB's block cache is per WORKER, resolved as a side effect** exactly as
+  this step predicted. `FamilySchemaModule` (15 PStates) settled at 865.6MB —
+  *smaller* than `DigestModule` (0 PStates) at 1011.3MB. The ~3.8GB unknown that
+  could have invalidated the sizing does not exist.
+- **`-Xmx` tuning is demoted to a near-worthless RAM lever**: a 2.67× ceiling
+  difference produced 12.6% more RSS (1536m → 956.1MB vs 4096m → 1076.2MB).
+- **`conductor.child.opts` is promoted to the highest-value untried lever.** The
+  three daemons cost **2.33GB — ~39% of the idle total — before any module
+  loads.** Unlike worker `-Xmx`, it needs no redeploy.
+
+**One caveat that must travel with the number:** the floor retained 1.78GB of
+non-Rama compressor state, so the subtraction is slightly generous to Rama.
+
+**A methodological finding worth carrying forward:** the first attempt was
+contaminated and would have been wrong in the dangerous direction. Compressed
+pages stay compressed, so RSS read from processes that lived through a pressure
+event understates by ~2× — ZooKeeper read 413.4MB contaminated vs 812.8MB clean.
+The shut-down → verify-settled → restart → plateau procedure is recorded in
+`RAMA_VERIFIED_LEARNINGS.md` ("Measurement contamination"). Any future
+measurement follows it.
+
+**➡️ Current state, and what to do next, live in `CLAUDE_HANDOFF.md`.** Findings
+are in `RAMA_VERIFIED_LEARNINGS.md` (four verified entries); reasoning and
+caveats in `REASONING.md` (2026-07-30).
+
+<details>
+<summary>Original Step 0 specification (retained — it produced the right experiment)</summary>
+
 Added 2026-07-29. **This is now the first action, ahead of provisioning anything.**
 Its entire purpose is to replace an estimate with data, because no one has ever
 recorded resident memory for a single Rama worker in this project.
@@ -79,10 +133,33 @@ procedure, including the redeploy-risk caveat and the two verification traps, is
 **Outcome determines the box size, the per-module heap plan, and whether module
 consolidation is needed at all.** Nothing gets provisioned or refactored before it.
 
+</details>
+
+---
+
+### Step 0b — Load testing under real ingestion (NEW first action)
+**This is now what everything is blocked behind.** Step 0 produced an idle floor;
+a box cannot be sized from it. This step produces the working figure.
+
+Gated on two things that are real gates, not formalities: **OAuth re-auth**
+(browser consent, Tor's hands, cannot be automated) and the **Gemini cost gate**
+(backlog count, then Tor's explicit sign-off on projected spend). Both are why
+this is its own session rather than a continuation.
+
+Measure the same fields as Step 0 — per-worker RSS, per-daemon RSS, system
+totals — but under load and sampled over time. **The delta between the ~6GB idle
+floor and the loaded peak is the number that sizes the box.** Start from a clean,
+settled floor per the contamination procedure. Read the compressor and swap, not
+free memory: low free is normal macOS behavior; the 2026-07-19 failure signature
+was a 10GB compressor at load 6.2.
+
+Full task spec in `CLAUDE_HANDOFF.md` ("Next Task", set 2026-07-30).
+
 ---
 
 ### Step 1 — Cloud deploy (SHARED — unblocks everything)
-**Box choice: PENDING Step 0's measurement.** Provision → install Java 21 + Rama
+**Box choice: PENDING the loaded measurement (Step 0b), not Step 0.** Step 0's
+~6GB is idle-only and must not be provisioned against. Provision → install Java 21 + Rama
 release → `local.dir` on Linux disk → deploy six modules fresh with heap sized
 deliberately from launch #1 → systemd auto-start.
 
@@ -233,9 +310,17 @@ than a plain notes app" would look like — and be willing to see the answer.
 
 ## One-line answer to "what do I do next"
 
-**Start the six modules on the Mini and measure actual RSS (Step 0).** Then provision a
+*(Superseded 2026-07-30 — Step 0 is complete. Current answer below.)*
+
+~~**Start the six modules on the Mini and measure actual RSS (Step 0).** Then provision a
 box sized from that measurement and deploy. Everything else — both products — is
-blocked behind those two, in that order.
+blocked behind those two, in that order.~~
+
+**Get real ingestion running and measure RSS under load (Step 0b).** That needs OAuth
+re-auth and the Gemini cost gate first. Step 0 measured ~6GB *idle*, which retracted the
+24GB figure and took consolidation off the table, but an idle floor cannot size a box.
+Then provision from the loaded number and deploy. Everything else — both products — is
+still blocked behind those, in that order.
 
 ---
 
@@ -307,6 +392,23 @@ per-PState scope that is ~3.8GB for `FamilySchemaModule`'s 15 PStates alone, and
 off-heap, so it appears in RSS but in none of the heap numbers quoted above. Logged in
 `RAMA_VERIFIED_LEARNINGS.md`'s Unverified section; Step 0's
 `FamilySchemaModule`-vs-`DigestModule` comparison resolves it as a side effect.
+
+**RESOLVED 2026-07-30 — the cache is per WORKER, and the ~9.5GB hypothesis held.**
+`FamilySchemaModule` (15 PStates) settled at 865.6MB, *smaller* than `DigestModule`
+(0 PStates) at 1011.3MB. The ~3.8GB term does not exist. Measured total: ~6GB idle, so
+the ~9.5GB extrapolation was slightly conservative — the right direction for a
+hypothesis to be wrong in. Note what this vindicates and what it doesn't: the error in
+the 2026-07-29 session was never the ~9.5GB estimate, it was **summing ceilings to
+24GB**. The estimate was directionally sound; the arithmetic on top of it was not.
+
+**And the rule caught itself one level down.** This section says don't act on a number
+nobody has observed. Step 0's first reading *was* an observation — and still wrong,
+because the instrument was contaminated: compressed pages stay compressed, understating
+RSS by ~2×. **Before trusting a number, check the instrument, not just the arithmetic.**
+Recorded in `RAMA_VERIFIED_LEARNINGS.md` ("Measurement contamination").
+
+The rule's own logic still applies to what Step 0 produced: **~6GB is idle**, and this
+section does not license buying a box on it either. That is what Step 0b is for.
 
 *Source: `RAMA_VERIFIED_LEARNINGS.md` ("`-Xmx` is a ceiling, not a reservation"),
 `REASONING.md` (2026-07-29), `CLAUDE_HANDOFF.md` (RSS measurement run).*
