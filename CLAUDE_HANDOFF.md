@@ -544,6 +544,75 @@ and reusable as a starting point on whatever platform hosts this next, though th
 should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
 a 24GB box.
 
+## Next Task (set 2026-08-02) — BLOCKER FOUND: cwd is overloaded (ZK dataset vs `tokens/`). Nothing deployed.
+
+**Read this before the 2026-08-01 section below — it supersedes that section's deploy step.** The
+2026-08-01 plan says "start daemons from the project root, then `--action update` the two modules."
+That cannot work as written, and the reason is a genuine conflict, not a mistake in the plan.
+
+### Root cause — cwd selects the ZooKeeper dataset
+
+**`rama devZookeeper` resolves its data directory relative to cwd.** There are two `local-zk` datasets
+on this machine and cwd decides which one the cluster sees:
+
+| Dataset | Contents | Last written |
+|---|---|---|
+| `family_assistant/local-zk` | **stale April data** (Apr 11–22) | Aug 2 16:35 — today's project-root run |
+| `~/rama-release/local-zk` | **the real July cluster metadata** | Jul 31 17:36 |
+
+Starting the daemons from the project root therefore pointed the cluster at the **April** dataset, which
+has never heard of the July deployments. All six modules read `{"moduleState":"NOT_ALIVE",
+"appendTargetId":null}` — not because anything broke, but because they were launched against the other
+ZooKeeper. Confirmed: all six module names appear by exact class name in `~/rama-release/logs/conductor.log`,
+alongside 7 worker logs from Jul 31.
+
+**cwd is overloaded.** `tokens/` is *also* cwd-relative (`GmailService.java:73`) and requires the
+project root so workers find the OAuth credential. So one setting controls two unrelated things and
+they want opposite values:
+
+- project-root cwd → `tokens/` resolves ✓, wrong ZK dataset ✗
+- `~/rama-release` cwd → correct ZK dataset ✓, `tokens/` silently fails after OAuth reports success ✗
+
+### DECISION for next session — Option 1: fresh launch from project root
+
+1. **Archive `family_assistant/local-zk` first** so ZooKeeper starts clean (do not merge or transplant
+   datasets — move the April one aside).
+2. Start daemons from the project root, `GEMINI_API_KEY` exported before the Supervisor.
+3. **`--action launch` all six modules — NOT `update`.** They do not exist in a clean ZK dataset, so
+   `update` has nothing to update.
+4. **`appendTargetId` / cutover checks do not apply to a first launch.** There is no prior instance to
+   cut over from; a fresh launch has no before-value to compare against. Skip that verification — it is
+   a redeploy check and reporting it here would be meaningless.
+5. `--configOverrides worker-heap-overrides.yaml` on **every** module — never inherited.
+
+**Nothing real is lost by launching fresh.** `local.dir` (`~/rama-data`) holds **no RocksDB artifacts
+at all** — no `.sst`, no `CURRENT`, no `MANIFEST`, 15 MB total, `conductor/jars` empty. That matches the
+record that nothing was ever ingested: the PStates were empty by definition. What the April dataset
+costs us is deployment *metadata*, not data. Module JARs rebuild from the fat jar.
+
+### Durable fix — do this next session
+
+**Pin both cwd-relative paths to absolute locations** so neither depends on where a daemon happens to be
+started: the ZooKeeper data dir, and `tokens/` in `GmailService.java:73`. Until that is done, every
+daemon start is a chance to silently pick the wrong ZooKeeper dataset, and every worker start is a
+chance to silently miss the OAuth credential. Both failures look like success at startup.
+
+### Next session resumes at
+
+`clean ZK` → `launch six` → `backlog count + Gemini pricing` → **cost sign-off (HARD STOP)** → `ingest`
+
+### Also verified this session
+
+- **Daemons log to `~/rama-release/logs/`, not `family_assistant/logs/`.** A `nohup` redirect from the
+  project root captures only stdout and yields a 0-byte file; the real conductor/supervisor/worker logs
+  are in the release directory. Look there when diagnosing.
+- Daemon startup itself is sound: ZK → `conductorReady` → `numSupervisors` all came up clean from the
+  project root, and all three daemons held cwd = project root (`lsof -a -p <pid> -d cwd`). Worker cwd
+  was **not** verified — no module was ever launched, so no worker process existed to check.
+- `local.dir` is `/Users/toddkeelingfolder/rama-data` per `rama.yaml`. The "Components needed" section
+  further down still says `/Volumes/CORSAIR/rama-data`; that is stale — `rama.yaml` is authoritative and
+  documents the 2026-07-17 move to internal APFS.
+
 ## Next Task (set 2026-08-01) — Step 0b: code is DONE and green; resumes at DEPLOY
 
 **Both code blockers are cleared and committed. Nothing was deployed — the session was time-boxed and a
@@ -564,14 +633,18 @@ cwd"). `GmailService.java:73` uses a relative `tokens/` path, so in cluster mode
 against the Supervisor's cwd. **This would have failed silently AFTER OAuth reported success.** Verify with
 `lsof -a -p <worker-pid> -d cwd` — that check is still outstanding.
 
-**3. OAuth consent flow (Tor's hands).** Consent screen is already flipped to **"In production"**, so the
-7-day expiry root cause is fixed. `tokens/StoredCredential` is still the dead **Jul 17 13:24, 846-byte**
-file — confirmed again this session by a live `invalid_grant` during `GmailIngestionTest`. Back it up to
-`.dead`, delete it (the library will not prompt while a token file exists), then:
-`java -cp target/family-assistant-1.0.0-jar-with-dependencies.jar com.family.assistant.gmail.GmailOAuthSetup`
-(the fat jar avoids an unverified `exec:java` interaction with the pom's `exec-maven-plugin` config, which is
-set up for `exec:exec`). Authorize as **toddkeeling@gmail.com**. Success = the printed mailbox total from its
-real `getProfile()` call, not a written file.
+**3. OAuth consent flow — DONE (2026-08-02).** Consent screen is **"In production"** (confirmed against
+the live Audience screen for `family-assistant-dev-490204` on 08-02). The dead Jul 17 credential was
+backed up, deleted, and re-authorized via `GmailOAuthSetup`. Verified twice: the runner's real
+`getProfile()` call returned `toddkeeling@gmail.com` / 45,875 messages, and a direct `refresh_token`
+grant against `https://oauth2.googleapis.com/token` returned **HTTP 200** (`expires_in` 3599, scopes
+`gmail.readonly gmail.modify`). `tokens/StoredCredential` is now a working **Aug 2 16:14, 1178-byte**
+file with both refresh and access tokens present. The `.dead` backup was shredded after verification.
+
+`mvn -q compile exec:java -Dexec.mainClass="com.family.assistant.gmail.GmailOAuthSetup"` worked fine —
+the previously suspected bad interaction with the pom's `exec-maven-plugin` config (configured for
+`exec:exec`) **did not materialize**; the plugin-level `executable`/`commandlineArgs` are ignored by the
+`exec:java` goal. The fat-jar invocation remains a valid alternative, not a requirement.
 
 **4. Step 3 cost gate — HARD STOP.** Needs a new `GmailBacklogCount` tool: read-only, **paginating**, counting
 against `GmailQueryConfig.fetchQuery()` — the same resolver the module calls, which is the entire point of the
@@ -643,12 +716,21 @@ replay is unaffected.
 reproducible; **OAuth re-auth was prepared but never executed**, so everything from the cost gate
 onward is untouched. Details in "PARTIAL (2026-07-31)" below. Run the next session in this order:
 
-**1. Flip the OAuth consent screen to "In production"** in `family-assistant-dev-490204` — console
-only, no code change, no redeploy. The stored token was written **2026-07-17** and was dead by
-**07-31 (14 days)** with `invalid_grant`. OAuth clients left in **"Testing"** publishing status issue
-refresh tokens that **expire after 7 days**, which fits the observed lifetime exactly. Re-authing
-without flipping this buys 7 more days and then dies again — quite possibly mid-ingestion. Flip it
-first, *then* re-auth (`scratchpad/reauth.sh` equivalent, see below).
+**1. OAuth — DONE (2026-08-02), but the original failure is still unexplained.** The consent screen is
+**"In production"** in `family-assistant-dev-490204`, confirmed on the live Audience screen. Re-auth is
+complete and verified (see item 3 in the current-session list above).
+
+**The "Testing → 7-day expiry" theory previously recorded here was wrong and has been removed.** Two
+reasons it never held up: the client was already in production, and the observed lifetime doesn't fit —
+the token was written **2026-07-17** and was dead by **07-31**, which is **14 days, not 7**. The earlier
+note claimed this "fits the observed lifetime exactly"; it does not. So the cause of the 07-31
+`invalid_grant` remains **unknown** — candidate explanations (unverified): a manual revoke, a Google-side
+session/security event, or the 100-refresh-token-per-client-per-account rotation limit.
+
+**Consequence: durability is unproven.** The 08-02 token is confirmed working *today*, but nothing here
+predicts how long it lasts. Re-run the grant check around **2026-08-09** — that is the first real
+datapoint on whether tokens now survive. If it dies again at ~14 days with the client in production, the
+rotation-limit hypothesis is the one to chase first.
 
 **2. Fix the hardcoded Gmail query, then redeploy `GmailIngestionModule` with `--configOverrides`.**
 `GmailIngestionModule.java:148` hardcodes:
@@ -725,10 +807,14 @@ so this is a plateau, not a ramp). Consistent with the Step 0 idle profile; **no
 | ZooKeeper | 695.2 MB |
 | Supervisor | 604.2 MB |
 
-**Step 2 — OAuth: NOT DONE.** The command was prepared and handed over, but the flow was never run —
-verified afterward: `tokens/StoredCredential` was still the original **Jul 17 13:24, 846 bytes**, and
-the backup the script writes before deleting it (`StoredCredential.dead`) did not exist. **The dead
-token is still in place.** Next session must actually execute the consent flow.
+**Step 2 — OAuth: NOT DONE as of 07-31.** The command was prepared and handed over, but the flow was
+never run — verified afterward: `tokens/StoredCredential` was still the original **Jul 17 13:24, 846
+bytes**, and the backup the script writes before deleting it (`StoredCredential.dead`) did not exist.
+
+**Superseded 2026-08-02: the consent flow was executed and the token is now live and verified.** See
+the OAuth entry in the current-session list. The store is a working **Aug 2 16:14, 1178-byte**
+credential for `toddkeeling@gmail.com`; the `.dead` backup was shredded after the new token passed both
+a `getProfile()` call and a direct `refresh_token` grant.
 
 **Steps 3, 4, 5: not started.** No backlog count, no ingestion, no cost gate, no `/commitments`
 verification. Nothing was ingested and no Gemini calls were made — **no spend occurred this session.**
