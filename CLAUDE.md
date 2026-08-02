@@ -137,7 +137,12 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 cd /Users/toddkeelingfolder/CORSAIR/family_assistant
 mvn test
 
-# Build fat JAR
+# Build fat JAR -> target/family-assistant-1.0.0-jar-with-dependencies.jar
+# The assembly plugin is bound to the `package` phase (pom.xml), so this one
+# command is sufficient. NEVER run `mvn assembly:single` on its own: outside the
+# lifecycle it produces a ~259MB jar with every dependency but NO project classes
+# — it looks correct by size and fails only at deploy time. Verify a build with:
+#   unzip -l target/family-assistant-1.0.0-jar-with-dependencies.jar | grep -c com/family
 mvn clean package -DskipTests
 
 # Deploy a module to local cluster

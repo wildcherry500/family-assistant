@@ -109,6 +109,10 @@
           <commandlineArgs>-cp %classpath com.family.assistant.FamilyAssistantApp</commandlineArgs>
         </configuration>
       </plugin>
+      <!-- Fat jar is built by the package phase. Do NOT run `assembly:single` as a
+           standalone goal: outside the lifecycle it emits a jar containing every
+           dependency but NONE of this project's classes — right size, unusable for
+           `rama deploy`. Keep this execution bound so `mvn clean package` is enough. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-assembly-plugin</artifactId>
@@ -118,6 +122,15 @@
             <descriptorRef>jar-with-dependencies</descriptorRef>
           </descriptorRefs>
         </configuration>
+        <executions>
+          <execution>
+            <id>make-fat-jar</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
 
