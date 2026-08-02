@@ -620,6 +620,48 @@ rather than proportional — but unlike `-Xmx` on workers, this one costs no red
 
 ---
 
+### Relative file paths in module code resolve against the SUPERVISOR's cwd in cluster mode, not the project root — the local-vs-cluster trap
+Verified 2026-08-01 (Step 0b query-fix session) by reading the source, not by guessing: `GmailService.java:73`
+constructs its OAuth token store as
+
+```java
+new FileDataStoreFactory(new java.io.File(TOKENS_DIRECTORY))   // TOKENS_DIRECTORY = "tokens"
+```
+
+A relative `java.io.File` resolves against the JVM's `user.dir`. In **local mode** (`InProcessCluster`,
+launched by `mvn compile exec:exec` from the project root) that is the project root, so `tokens/StoredCredential`
+is found and everything works. In **cluster mode** the Gmail call executes inside the `GmailIngestionModule`
+**worker JVM**, which the Supervisor launches as a child process — so `user.dir` is whatever directory the
+Supervisor itself was started from, which has no necessary relationship to the project root.
+
+**Why this is a silent failure, and why it is worth its own entry:** the OAuth consent flow is run separately
+(`GmailOAuthSetup`, from the project root) and will report `SUCCESS` with a real mailbox total. The token is
+genuinely valid. The worker simply cannot see the file, and the library's response to a missing token is to
+attempt an interactive browser consent — inside a headless worker process. **Auth appears to succeed and
+ingestion still fails, with the two events separated in time and in log file.**
+
+Confirmed by inspection this session: `supervisor.log`'s `Launching process` line records the full worker
+command (`java -server -Xmx... -cp /Users/toddkeelingfolder/rama-release/rama.jar:...`) but **does not record
+a working directory**, and Rama passes no `-Duser.dir`. So the cwd is inherited, and nothing in the logs will
+tell you what it was. This project has never run Gmail ingestion in cluster mode (Part 3 never happened), so
+this has never been exercised.
+
+**Zero-cost mitigation, and the one to use: start the Supervisor with `cwd` = project root.** Workers inherit
+it. Verify rather than assume — `lsof -a -p <worker-pid> -d cwd` after the module comes up. The same
+inheritance applies to environment variables (`GEMINI_API_KEY`, `GMAIL_INGEST_QUERY`): they must be exported
+**before** the Supervisor starts, not before the deploy command.
+
+**NOT YET OBSERVED, and deliberately not claimed:** the actual cwd of a running worker on this machine. The
+mechanism above is verified from source and from Java's documented `File` semantics; the empirical cwd check
+is pending and is a step in the next session's deploy. If it turns out the Supervisor was already being
+started from the project root, the trap was merely dormant, not absent — a cloud box with a systemd unit
+(which sets its own `WorkingDirectory`) will differ, which is exactly why this is recorded now.
+
+**General form of the rule: any relative path in code that runs inside a Rama module is a cluster-mode
+liability.** Local-mode tests cannot catch it, because local mode runs in the process the developer started.
+
+---
+
 ## Unverified — do not use without confirming
 
 ### OPEN INVESTIGATION: does `rama.yaml`'s `worker.child.opts` apply to CLI-deployed modules at all?

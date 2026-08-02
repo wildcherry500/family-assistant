@@ -48,6 +48,28 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
     }
 
     // -----------------------------------------------------------------------
+    // Provenance constants — stamped on every derived event
+    //
+    // These exist so a future replay can tell which generation of the parser produced
+    // a given record: re-drain *raw-emails through a newer parser and the stamps are
+    // what distinguish old records from new ones.
+    // -----------------------------------------------------------------------
+
+    /**
+     * The model actually called. Referenced by the gemini-model agent-object builder
+     * below, so the stamp cannot drift from the model in use — change it in one place
+     * and both the call and the stamp move together.
+     */
+    public static final String MODEL_ID = "gemini-2.5-flash";
+
+    /**
+     * Generation of the classify + extract-details prompts.
+     * BUMP THIS whenever either prompt's text changes — that is the entire point of the
+     * field. It labels the prompt generation, not the day a record was parsed.
+     */
+    public static final String PROMPT_VERSION = "v1";
+
+    // -----------------------------------------------------------------------
     // Classification result — passed between classify and extract-details nodes
     // -----------------------------------------------------------------------
     public enum EmailCategory {
@@ -83,13 +105,18 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
         // write-to-store, never emitted by the LLM). Each entry: relation/objectType/object,
         // all validated against a closed enum before landing here (see parseRelations).
         public final List<Map<String, String>> relations;
+        // Provenance: which model and which prompt generation produced this parse.
+        // Purely additive — nothing indexes or branches on these.
+        public final String modelId;
+        public final String promptVersion;
 
         public ParsedEvent(String category, String title, String description,
                            String startTime, String deadline,
                            String childId, String childName, String sourceEmail,
                            String senderEmail, String senderName, String emailSubject,
                            String gmailMessageId, long receivedAt, String accountLabel,
-                           String silo, String intent, List<Map<String, String>> relations) {
+                           String silo, String intent, List<Map<String, String>> relations,
+                           String modelId, String promptVersion) {
             this.category      = category;
             this.title         = title;
             this.description   = description;
@@ -107,6 +134,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
             this.silo          = silo;
             this.intent        = intent;
             this.relations     = relations;
+            this.modelId       = modelId;
+            this.promptVersion = promptVersion;
         }
     }
 
@@ -124,7 +153,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                                 System.getenv("GEMINI_API_KEY"));
                 return GoogleAiGeminiChatModel.builder()
                     .apiKey(key)
-                    .modelName("gemini-2.5-flash")
+                    .modelName(MODEL_ID)
                     .maxRetries(5)
                     .build();
             });
@@ -298,7 +327,8 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                         message.senderEmail, message.senderName,
                         message.emailSubject, message.gmailMessageId,
                         message.receivedAt, message.accountLabel,
-                        silo, intent, relations
+                        silo, intent, relations,
+                        MODEL_ID, PROMPT_VERSION
                     );
 
                     agentNode.emit("write-to-store", event);
@@ -367,6 +397,12 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("senderName",     event.senderName);
                     eventRecord.put("emailSubject",   event.emailSubject);
                     eventRecord.put("gmailMessageId", event.gmailMessageId);
+                    // Provenance — stamped on every derived event. Additive: no index reads
+                    // these, nothing branches on them, and pre-existing records simply lack
+                    // the keys. They exist so a replay can tell which model + prompt
+                    // generation produced a given record.
+                    eventRecord.put("modelId",        event.modelId);
+                    eventRecord.put("promptVersion",  event.promptVersion);
                     eventRecord.put("status",         "pending");
                     eventRecord.put("created",        now);
                     eventRecord.put("updated",        now);

@@ -138,6 +138,8 @@ Path.key("*familyId", "*epochMs").nullToSet().voidSetElem().termVal("*eventId")
 | `confidence` | Double | **Schema-only (2026-07-05): classifier score, plumbed, not yet populated — `null` this session. Always `Double`, never `Integer`.** |
 | `reason` | String | **Schema-only (2026-07-05): classifier rationale, plumbed, not yet populated — `null` this session.** |
 | `urgency` | String | critical, high, medium, low |
+| `modelId` | String | **Added 2026-08-01.** LLM that produced this parse — `EmailParsingModule.MODEL_ID`, currently `gemini-2.5-flash`. The agent-object builder references the same constant, so the stamp cannot drift from the model actually called. |
+| `promptVersion` | String | **Added 2026-08-01.** Generation of the classify + extract-details prompts — `EmailParsingModule.PROMPT_VERSION`, currently `v1`. **Bump on any prompt-text change.** Labels the prompt generation, not the parse date. |
 | `status` | String | pending, completed |
 | `sourceType` | String | email, test |
 | `accountLabel` | String | Gmail account label |
@@ -542,7 +544,228 @@ and reusable as a starting point on whatever platform hosts this next, though th
 should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
 a 24GB box.
 
-## Next Task (set 2026-07-30) — Load testing under real ingestion; box sizing stays deferred
+## Next Task (set 2026-08-01) — Step 0b: code is DONE and green; resumes at DEPLOY
+
+**Both code blockers are cleared and committed. Nothing was deployed — the session was time-boxed and a
+module update that cannot be watched to completion is worse than one not started.** Resume here:
+
+**1. Deploy the two changed modules.** `mvn clean package -DskipTests`, start daemons **from the project
+root** (see step 2), then `--action update` **`EmailParsingModule` first** (lighter; its update genuinely
+succeeded on 2026-07-19, so it rehearses the procedure) and **`GmailIngestionModule`** second. Both need
+`--jar` AND `--configOverrides worker-heap-overrides.yaml` — overrides are never inherited; the trap has
+already fired once. **`FamilySchemaModule` is NOT redeployed, so the `UPDATE-PREPARE-HANDOVER` risk does not
+apply.** Record `appendTargetId` for both modules BEFORE updating, and verify after: `appendTargetId` must
+have CHANGED, match the new instance ID from the launch log, and equal `readTargetId`. `RUNNING` alone proves
+nothing.
+
+**2. Start the Supervisor with `cwd` = project root, and export env before starting it, not before deploying.**
+New this session — see `RAMA_VERIFIED_LEARNINGS.md` ("Relative file paths resolve against the SUPERVISOR's
+cwd"). `GmailService.java:73` uses a relative `tokens/` path, so in cluster mode the worker resolves it
+against the Supervisor's cwd. **This would have failed silently AFTER OAuth reported success.** Verify with
+`lsof -a -p <worker-pid> -d cwd` — that check is still outstanding.
+
+**3. OAuth consent flow (Tor's hands).** Consent screen is already flipped to **"In production"**, so the
+7-day expiry root cause is fixed. `tokens/StoredCredential` is still the dead **Jul 17 13:24, 846-byte**
+file — confirmed again this session by a live `invalid_grant` during `GmailIngestionTest`. Back it up to
+`.dead`, delete it (the library will not prompt while a token file exists), then:
+`java -cp target/family-assistant-1.0.0-jar-with-dependencies.jar com.family.assistant.gmail.GmailOAuthSetup`
+(the fat jar avoids an unverified `exec:java` interaction with the pom's `exec-maven-plugin` config, which is
+set up for `exec:exec`). Authorize as **toddkeeling@gmail.com**. Success = the printed mailbox total from its
+real `getProfile()` call, not a written file.
+
+**4. Step 3 cost gate — HARD STOP.** Needs a new `GmailBacklogCount` tool: read-only, **paginating**, counting
+against `GmailQueryConfig.fetchQuery()` — the same resolver the module calls, which is the entire point of the
+query fix. Do **not** use the module's `alreadyProcessed` field for this: it reads one result page and
+saturates (known defect, left in place deliberately, documented in code). Price at `count × 2` Gemini calls,
+fetching current `gemini-2.5-flash` rates at gate time rather than quoting from memory. **Tor's explicit
+sign-off before anything ingests.**
+
+**5. Then Step 4** (ingest + measure RSS under load; `maxResults=10` with no pagination means ingestion is
+inherently batched in tens — a useful throttle) **and Step 5** (`/commitments` end to end, plus read back one
+record to confirm `modelId`/`promptVersion` actually landed — the real verification of the provenance work).
+
+**Floor numbers below still apply** — re-establish the floor from scratch; the 07-31 cluster-up system totals
+are Spotlight-contaminated.
+
+---
+
+## Recently Completed (2026-08-01) — Step 0b Tasks 1 & 2: configurable Gmail query + provenance stamping
+
+**152/152 non-LLM tests green** (was 145/145; +7 new `GmailQueryConfigTest`, `NonLlmPipelineTest` test 33
+amended not added). Zero regressions. Code committed; **no deploy** — see Next Task above.
+
+**Task 1 — the query is no longer hardcoded, and the two call sites can no longer drift.** New
+`com.family.assistant.gmail.GmailQueryConfig` resolves env `GMAIL_INGEST_QUERY` → `application.properties`
+`pa.gmail.query` → `DEFAULT_QUERY`, which is now exactly
+`in:INBOX -label:FamilyAssistant/Processed after:2026-07-01` — **date-bounded and deliberately NOT
+`is:unread`** (read/unread is a mailbox UI concern; the `FamilyAssistant/Processed` label is the real record
+of what has been ingested). `GmailIngestionModule` resolves it once per invocation and **derives** the
+already-processed count query from that same value (`-label:X` → `label:X`, appending the term if no
+exclusion is present) instead of carrying a second hardcoded string. Both queries are logged.
+`FetchRequest` gained a nullable `query` field (2-arg and 3-arg constructors delegate, so both existing call
+sites compile unchanged). `PROCESSED_LABEL_NAME` now has one definition instead of two.
+
+**Why derivation rather than a second config value:** the cost gate prices what `GmailQueryConfig.fetchQuery()`
+returns; if the count query were configured independently it could silently describe a different message
+population. Derivation makes consistency structural rather than a promise.
+
+**Task 2 — provenance.** `MODEL_ID` (`gemini-2.5-flash`) and `PROMPT_VERSION` (`v1`) constants in
+`EmailParsingModule`, stamped onto `ParsedEvent` and onto **every** event record. The `gemini-model`
+agent-object builder now references `MODEL_ID` instead of repeating the literal, so the stamp cannot drift
+from the model actually called. Purely additive: no index reads them, nothing branches on them, no PState
+declaration changed, and pre-existing records simply lack the keys.
+
+**Gate-review confirmations recorded, because one of them is a correction worth keeping:** the
+assembled-`HashMap`-plus-`termVal` trap does **not** apply here. This change adds **zero PState writes** —
+`modelId`/`promptVersion` are two more keys on a *depot payload* appended to `*family-events`. The PState
+write is `FamilySchemaModule.java:279`'s whole-record `termVal("*record")`, untouched, and it is safe because
+grep confirms it is the **only** write to `$$family-data` anywhere — no later, narrower write ever navigates
+into a stored event record. The trap only bites when a value is *both* assembled as one `Map` *and* later
+targeted by a partial write (that is `$$commitments`, which correctly uses sequential `localTransform` calls
+for exactly that reason). Also confirmed: no `Map.of()`/`List.of()`/`Arrays.asList()` in any new field
+construction — the new fields are plain `String` constants.
+
+**Two pre-existing defects found and deliberately left in place** (flagged, not silently fixed): the
+`alreadyProcessed` counter reads a single result page and saturates (now documented in code as
+display-only — **must not be used for the cost gate**), and two debug probes hardcode
+`in:INBOX from:acemystuff@gmail.com` (log-only, fire only on a zero-result fetch).
+
+**`EDGE_CODE_RULES.md` check:** no new creep. The query is a filter, but it is not a *new* filter — the Gmail
+API requires a selector. This made an existing hardcoded one configurable and observable, moved zero decisions
+into the edge, and left the `*raw-emails` write-ahead depot receiving every fetched message complete, so
+replay is unaffected.
+
+---
+
+## Superseded Next Task (set 2026-07-31) — Step 0b resumes at OAuth; two blockers must clear before the cost gate
+
+**Session of 2026-07-31 got through Step 1 only.** Cluster start and module verification are done and
+reproducible; **OAuth re-auth was prepared but never executed**, so everything from the cost gate
+onward is untouched. Details in "PARTIAL (2026-07-31)" below. Run the next session in this order:
+
+**1. Flip the OAuth consent screen to "In production"** in `family-assistant-dev-490204` — console
+only, no code change, no redeploy. The stored token was written **2026-07-17** and was dead by
+**07-31 (14 days)** with `invalid_grant`. OAuth clients left in **"Testing"** publishing status issue
+refresh tokens that **expire after 7 days**, which fits the observed lifetime exactly. Re-authing
+without flipping this buys 7 more days and then dies again — quite possibly mid-ingestion. Flip it
+first, *then* re-auth (`scratchpad/reauth.sh` equivalent, see below).
+
+**2. Fix the hardcoded Gmail query, then redeploy `GmailIngestionModule` with `--configOverrides`.**
+`GmailIngestionModule.java:148` hardcodes:
+```java
+String gmailQuery = "is:unread in:INBOX -label:" + PROCESSED_LABEL_NAME;
+```
+`FetchRequest` carries only `userId` and `maxResults` — **no query field**. The planned Step 3 filter
+is `in:INBOX -label:FamilyAssistant/Processed after:2026-07-01`: deliberately **NOT** `is:unread`, and
+date-bounded. **As deployed, the cost gate would price one set of messages and the module would
+ingest a different set** — the gate would be meaningless. Make the query configurable (plumb it
+through `FetchRequest`) so the gate prices exactly what runs. Note the count at line 138 uses a
+matching hardcoded query and needs the same treatment.
+
+This is the one redeploy that IS justified. **Use `--configOverrides` when you do it** — the trap has
+already fired once and left five of six workers on the 4096m default. Fixing that default is *not* a
+reason to redeploy on its own (measured: 2.67× ceiling bought 12.6% RSS), but since
+`GmailIngestionModule` is being redeployed anyway, set its overrides correctly in the same action.
+
+**3. Then Step 3 (cost gate) onward** — backlog count with the filter above, `count × 2` Gemini calls
+at `gemini-2.5-flash` rates with a dollar figure, **HARD STOP for Tor's explicit sign-off** before
+anything ingests. Then Step 4 (ingest + measure RSS under load) and Step 5 (verify `/commitments`
+end to end).
+
+### Floor numbers — read this before the next measurement
+
+- **The clean floor is now ~19GB used / ~4.2GB unused**, not the ~17GB / 6458MB of the Step 0 run.
+  Verified settled on 2026-07-31: compressor flat at **60MB** across 4 samples, swap 0/0,
+  `mds_stores` 0.0%, `pgrep -f java` = 0. **Next session's loaded delta must subtract this floor, not
+  Step 0's** — using the old one overstates Rama's footprint by ~2GB.
+- **The 2026-07-31 cluster-up system-memory numbers are Spotlight-contaminated — do not reuse them.**
+  `mds_stores` ran 120–165% for the entire cluster-up window (a reindex triggered by startup churn —
+  the exact false-floor signature the Step 0 procedure warns about). Per-process RSS from that window
+  is fine (it plateaued); the **system totals are not**.
+- **The post-shutdown reading is also not a settled floor.** It read 15–16GB used / ~8GB unused, but
+  the compressor was still at **377MB** against a 60MB clean baseline, i.e. ~317MB of compressed
+  state had not yet drained, and `mds_stores` only reached 0.0% on the final sample. Re-establish the
+  floor from scratch next session rather than trusting this number.
+
+**Everything below from the 2026-07-30 entry still stands** — worker `-Xmx` is not worth tuning for
+RAM, `conductor.child.opts` is the highest-value untried lever, consolidation is not needed.
+
+---
+
+## PARTIAL (2026-07-31) — Step 0b: Step 1 complete, Step 2 prepared but NOT executed
+
+**Step 1 — clean start: COMPLETE.** Floor confirmed settled by sampling (not a single read): 4 samples
+over 60s, compressor pinned at 60MB, free drifting <30MB, swap 0, `mds_stores` 0.0%, `pgrep -f java`
+= 0. Started ZooKeeper → Conductor → Supervisor. `conductorReady` was `false` until the Supervisor
+registered, then `true`; `numSupervisors` = 1.
+
+**All six modules RUNNING, all six with `appendTargetId == readTargetId`:**
+
+| Module | Target ID (append == read) |
+|---|---|
+| FamilySchemaModule | `55b3c805-76dc-6b42-6a41-bea212279e2b` |
+| EmailParsingModule | `e4e90fad-5eb4-96d9-abd1-2de58ba3ad79` |
+| EmailIngestionModule | `054a26c5-5b46-c061-2807-9c7bbd68d02d` |
+| GmailIngestionModule | `2d94891f-aae2-06e4-7f0b-d4d9866470dd` |
+| DigestModule | `6da28ce8-99b8-e12c-d33d-484747c0a6b2` |
+| QueryModule | `9e10e2a1-ce37-615f-5928-f23404e3f588` |
+
+Cluster-up per-process RSS, plateaued (sum oscillated 7693–7815MB across 5 samples, not climbing —
+so this is a plateau, not a ramp). Consistent with the Step 0 idle profile; **not** a loaded figure:
+
+| Process | RSS |
+|---|---|
+| QueryModule | 1075.9 MB |
+| GmailIngestionModule | 973.1 MB |
+| DigestModule | 961.2 MB |
+| EmailIngestionModule | 957.1 MB |
+| EmailParsingModule | 927.7 MB |
+| FamilySchemaModule | 905.1 MB |
+| Conductor | 713.2 MB |
+| ZooKeeper | 695.2 MB |
+| Supervisor | 604.2 MB |
+
+**Step 2 — OAuth: NOT DONE.** The command was prepared and handed over, but the flow was never run —
+verified afterward: `tokens/StoredCredential` was still the original **Jul 17 13:24, 846 bytes**, and
+the backup the script writes before deleting it (`StoredCredential.dead`) did not exist. **The dead
+token is still in place.** Next session must actually execute the consent flow.
+
+**Steps 3, 4, 5: not started.** No backlog count, no ingestion, no cost gate, no `/commitments`
+verification. Nothing was ingested and no Gemini calls were made — **no spend occurred this session.**
+
+**Useful things this session did establish:**
+
+- **The port-8888 conflict is dead, verified at runtime.** `rama.yaml` sets `cluster.ui.port: 8889`;
+  Conductor's UI was confirmed listening on **8889** while **8888 had no listener**. The project and
+  deployed `~/rama-release/rama.yaml` are byte-identical, so this will not regress. The OAuth
+  callback (`GmailService.java:78`, `LocalServerReceiver` on 8888) is clear to bind.
+- **`GmailOAuthSetup` now exists** (`src/main/java/com/family/assistant/gmail/GmailOAuthSetup.java`).
+  It was referenced in `GmailWatchSetup`'s javadoc as a prerequisite but had **never been written**.
+  Auth only — no Pub/Sub watch, no cluster connection — and it makes a real authenticated
+  `users().getProfile()` call so success means the token works, not merely that a file was written.
+  Compiles clean. Deliberately do **not** re-auth via `GmailWatchSetup`: it registers a Pub/Sub watch
+  as a side effect.
+- **Re-auth requires deleting the token first.** `rm -f tokens/StoredCredential` — the library will
+  not prompt for consent while a token file exists; it just retries the refresh and fails again.
+  Authorize as **toddkeeling@gmail.com** (`GmailService.java:80` calls
+  `.authorize("toddkeeling@gmail.com")`; a different account writes under the wrong user key).
+  Expect the **"Google hasn't verified this app"** interstitial → **Advanced** → **Go to Family
+  Assistant (unsafe)** — normal for a Desktop-type client in your own dev project. Scopes requested
+  are Gmail **readonly + modify** (modify is required to apply the `FamilyAssistant/Processed` label).
+- **ZooKeeper binds port 2000**, not 2181 — `lsof -iTCP:2181` will show nothing and that is correct.
+- **Possible follow-up, unverified:** `GmailWatchSetup.TOPIC_NAME` is
+  `projects/family-assistant-dev-490204/topics/gmail-notifications`, but this file's GCP section
+  records the created topic as **`gmail-push-notifications`**. If those really differ, watch
+  registration will fail. Not on the critical path (Step 0b ingestion is poll-driven, not push), and
+  not checked against the console this session — confirm before relying on push.
+
+**Shutdown was clean:** `rama shutdownCluster` (workers exited), then SIGTERM supervisor → conductor →
+ZooKeeper in that order, `pgrep -f java` verified **0**. Floor left clean for next session, with the
+draining caveat noted above.
+
+---
+
+## Next Task (superseded 2026-07-31, retained for context) — Load testing under real ingestion
 
 **Step 0 is DONE. Its number is ~6GB idle — and "idle" is why this session exists.** The measured
 figure has no app running, no ingestion, no LLM calls, no depot appends. It is a floor for the

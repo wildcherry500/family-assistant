@@ -3002,3 +3002,83 @@ own "RUNNING does not prove a cutover" rule. One operational discovery: `rama sh
 persists a `cluster-shutdown-complete` state in ZooKeeper, so `conductorReady` reports `false` after
 restart until a Supervisor registers. It clears on its own; `forceClusterOpen` is not needed. Also
 noted: `devZookeeper` listens on **port 2000**, not the ZooKeeper default 2181.
+
+## 2026-08-01 — Step 0b Tasks 1 & 2: the gate that would have been meaningless, and a trap found by reading
+
+Time-boxed session. Code landed and green; deploy deliberately not started (see the end of this entry).
+
+### The actual problem with the hardcoded query wasn't that it was hardcoded
+
+`GmailIngestionModule` carried the same filter twice — `:148` for the fetch, `:138` for the
+already-processed count. The brief framed the fix as "make it configurable." That is necessary but not
+sufficient: two independently-written strings that are *supposed* to describe the same message scope will
+drift the moment one is edited, and the failure is invisible, because both queries are individually
+plausible. The Step 3 cost gate would then price one population and the module would ingest another —
+i.e. the gate would produce a number that was precisely wrong rather than obviously wrong.
+
+So the count query is **derived** from the fetch query (`-label:X` → `label:X`) rather than configured
+alongside it. Consistency becomes structural instead of a convention someone has to remember. Two of the
+seven new tests exist purely to pin that relationship, and one pins the absence of `is:unread` — that being
+the specific regression the whole task exists to prevent.
+
+Worth noting *why* `is:unread` was wrong and not merely unwanted: read/unread state is a mailbox UI concern
+that a human changes by clicking around. It was never a record of what this system had ingested — that is
+what the `FamilyAssistant/Processed` label is. Using it as an ingestion filter coupled the pipeline's notion
+of "done" to an unrelated, user-mutable signal.
+
+### Two defects found that the brief didn't mention, both left alone on purpose
+
+The `alreadyProcessed` counter reads a single `messages.list` page and saturates at the page size — it has
+never been a true count. It is a display-only summary field, so this is cosmetic *there*, but it is exactly
+the kind of number that gets grabbed later for a purpose it can't support. Left in place, documented in code
+as unusable for sizing a backlog, and the Step 3 counter will paginate properly instead. Two debug probes
+hardcoding `from:acemystuff@gmail.com` were also left alone (log-only, zero-result path).
+
+Fixing either would have been easy. Neither was asked for, and quietly widening the diff on a session that
+also touches a module about to be redeployed is how a small change becomes an unreviewable one.
+
+### The finding that mattered was found by reading, not by running
+
+`GmailService.java:73` builds its token store from a **relative** path (`new File("tokens")`). In local mode
+that resolves against the project root and works. In cluster mode the Gmail call runs inside a
+Supervisor-launched worker, so it resolves against the *Supervisor's* cwd — and Rama neither logs a working
+directory nor sets `-Duser.dir`, so nothing in the logs would say what it was.
+
+The failure mode is what makes it worth an entry in `RAMA_VERIFIED_LEARNINGS.md`: OAuth is run separately and
+would report `SUCCESS` with a real mailbox total — the token genuinely being valid — while the worker,
+unable to see the file, falls back to attempting an interactive browser consent inside a headless process.
+**Auth succeeds and ingestion fails, separated in time and in log file.** Ingestion has never run in cluster
+mode (Part 3 never happened), so this has never been exercised and would have surfaced for the first time at
+precisely the worst moment: immediately after the cost gate, with spend already authorized.
+
+Mitigation is free — start the Supervisor from the project root and the workers inherit it. The honest part
+is what is *not* claimed: the actual cwd of a running worker has not been observed. The mechanism is verified
+from source and from documented `File` semantics; the empirical check (`lsof -d cwd`) is a step in the next
+session. If the Supervisor was already being started from the project root, the trap was dormant, not
+absent — and a cloud box with a systemd unit setting its own `WorkingDirectory` will differ, which is why it
+is recorded now rather than after it bites.
+
+General form, recorded as the rule: **any relative path in code that runs inside a Rama module is a
+cluster-mode liability, and local-mode tests structurally cannot catch it** — local mode runs in the process
+the developer started.
+
+### On the gate review's Gate 3, which I answered "no" to
+
+The review asked me to confirm the new fields are written via sequential `localTransform` rather than an
+assembled `HashMap` + `termVal`. Answering yes would have been false, and answering it as-asked would have
+meant rewriting `FamilySchemaModule`'s record write into 27 individual transforms — in a module explicitly
+excluded from this deploy.
+
+The change adds zero PState writes. `modelId`/`promptVersion` are two more keys on a *depot payload*. The
+PState write is `FamilySchemaModule.java:279`'s whole-record `termVal("*record")`, and it is safe precisely
+because grep confirms it is the only write to `$$family-data` anywhere — the trap requires a value to be both
+assembled as one `Map` *and* later targeted by a narrower write, which is `$$commitments` (correctly using
+sequential `localTransform` for that reason) and is not this. The right response to a gate question is to
+check the precondition, not to perform the remedy.
+
+### Why the deploy didn't happen
+
+Roughly 30 minutes were available. Tasks 1 and 2 plus the suite fit; a two-module `--action update` does not
+fit reliably — the last cluster update on this box got watchdog-killed mid-handover and needed diagnosis.
+Starting a module update that cannot be watched to completion is strictly worse than not starting one. Repo
+left green at 152/152 with the deploy as the next session's first action.

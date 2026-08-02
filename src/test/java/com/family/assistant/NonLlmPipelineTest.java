@@ -361,7 +361,8 @@ public class NonLlmPipelineTest {
             "billy", "Billy", "raw email body",
             "teacher@school.edu", "Mr. Jacobs", "Zoo Field Trip",
             "gmail-msg-123", System.currentTimeMillis(), "todd@gmail.com",
-            "VAULT", "ACTION_REQUIRED", relations);
+            "VAULT", "ACTION_REQUIRED", relations,
+            EmailParsingModule.MODEL_ID, EmailParsingModule.PROMPT_VERSION);
 
         EmailParsingModule.ParsedEvent deserialized = roundTrip(original);
 
@@ -376,6 +377,11 @@ public class NonLlmPipelineTest {
         assertEquals(original.silo, deserialized.silo);
         assertEquals(original.intent, deserialized.intent);
         assertEquals(original.relations, deserialized.relations);
+        // Provenance stamps survive serialization (added 2026-08-01)
+        assertEquals(original.modelId, deserialized.modelId);
+        assertEquals(original.promptVersion, deserialized.promptVersion);
+        assertEquals("gemini-2.5-flash", deserialized.modelId);
+        assertEquals("v1", deserialized.promptVersion);
     }
 
     @Test

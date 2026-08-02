@@ -20,13 +20,20 @@ import java.util.Set;
 /**
  * GmailIngestionModule
  *
- * Fetches unread Gmail messages and routes them through the email parsing
- * pipeline (EmailIngestionModule → EmailParsingModule → FamilySchemaModule).
+ * Fetches Gmail messages matching the configured ingestion query and routes them
+ * through the email parsing pipeline (EmailIngestionModule → EmailParsingModule →
+ * FamilySchemaModule).
  *
  * Agent graph: fetchAndProcess (terminal)
  *
- * Input:  FetchRequest(userId, maxResults)
+ * Input:  FetchRequest(userId, maxResults, accountLabel, query)
  * Output: IngestionSummary(fetched, processed, failed)
+ *
+ * The Gmail search query is NOT hardcoded — it resolves through GmailQueryConfig
+ * (env → application.properties → default), and the already-processed count query is
+ * derived from it rather than written separately, so the two cannot drift. See
+ * GmailQueryConfig for the precedence chain and the "export before starting the
+ * Supervisor" note.
  */
 public class GmailIngestionModule extends AgentModule implements java.io.Serializable {
 
@@ -42,19 +49,28 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
         public final String userId;
         public final int maxResults;
         public final String accountLabel; // Gmail account email, e.g. "user@gmail.com"; null if unknown
+        // Gmail search query override. null/blank = use GmailQueryConfig.fetchQuery().
+        // Present so a caller can pin the exact query it intends (and log it), without
+        // reintroducing a hardcoded default anywhere.
+        public final String query;
 
         public FetchRequest(String userId, int maxResults) {
-            this(userId, maxResults, null);
+            this(userId, maxResults, null, null);
         }
 
         public FetchRequest(String userId, int maxResults, String accountLabel) {
+            this(userId, maxResults, accountLabel, null);
+        }
+
+        public FetchRequest(String userId, int maxResults, String accountLabel, String query) {
             this.userId       = userId;
             this.maxResults   = maxResults;
             this.accountLabel = accountLabel;
+            this.query        = query;
         }
     }
 
-    private static final String PROCESSED_LABEL_NAME = "FamilyAssistant/Processed";
+    private static final String PROCESSED_LABEL_NAME = GmailQueryConfig.PROCESSED_LABEL_NAME;
 
     // -----------------------------------------------------------------------
     // Sender blocklist — matched against the From header (case-insensitive)
@@ -129,13 +145,25 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                         processedLabelId = null;
                     }
 
-                    // 3. Count already-processed unread messages (excluded from main fetch)
+                    // 3. Resolve the ingestion query ONCE — both the fetch below and the
+                    //    already-processed count are derived from this single value.
+                    String gmailQuery = (request.query != null && !request.query.isBlank())
+                        ? request.query.trim()
+                        : GmailQueryConfig.fetchQuery();
+                    String countQuery = GmailQueryConfig.processedCountQuery(gmailQuery);
+                    System.out.println("[GmailIngestionModule] Fetch query: " + gmailQuery);
+                    System.out.println("[GmailIngestionModule] Processed-count query: " + countQuery);
+
+                    // 4. Count already-processed messages in the same scope (excluded from main fetch).
+                    //    NOTE: this reads a single result page, so it saturates at the API's page
+                    //    size — it is a display-only summary figure and must NOT be used to size a
+                    //    backlog or price an ingestion run. Use GmailBacklogCount for that.
                     int alreadyProcessed = 0;
                     if (processedLabelId != null) {
                         try {
                             var countResponse = gmail.users().messages()
                                 .list(request.userId)
-                                .setQ("is:unread in:INBOX label:" + PROCESSED_LABEL_NAME)
+                                .setQ(countQuery)
                                 .execute();
                             var counted = countResponse.getMessages();
                             alreadyProcessed = (counted != null) ? counted.size() : 0;
@@ -144,9 +172,7 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                         }
                     }
 
-                    // 4. List unread messages not yet labeled as processed
-                    String gmailQuery = "is:unread in:INBOX -label:" + PROCESSED_LABEL_NAME;
-                    System.out.println("[GmailIngestionModule] Query: " + gmailQuery);
+                    // 5. List messages matching the ingestion query
                     List<Message> messages;
                     try {
                         var listResponse = gmail.users().messages()
@@ -165,7 +191,8 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                     }
 
                     if (messages == null || messages.isEmpty()) {
-                        // Probe without the unread filter to diagnose whether emails exist but are read
+                        // Diagnostic probe — shows whether messages from a known sender exist
+                        // in INBOX at all, independent of the ingestion query's filters
                         try {
                             var probe = gmail.users().messages()
                                 .list(request.userId)
@@ -197,7 +224,7 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                         return;
                     }
 
-                    // 5. Fetch full message, apply sender pre-filter, build GmailMessage objects
+                    // 6. Fetch full message, apply sender pre-filter, build GmailMessage objects
                     List<GmailMessage> gmailMessages = new ArrayList<>();
                     List<String> messageIds          = new ArrayList<>();
                     int skipped = 0;
@@ -272,7 +299,7 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                         return;
                     }
 
-                    // 6. Route through the email parsing pipeline
+                    // 7. Route through the email parsing pipeline
                     AgentClient ingestionClient = agentNode.getMirrorAgentClient(
                         "EmailIngestionModule", "email-ingestion-agent");
 
@@ -280,7 +307,7 @@ public class GmailIngestionModule extends AgentModule implements java.io.Seriali
                         (EmailIngestionModule.IngestionResult)
                             ingestionClient.invoke(new ArrayList<>(gmailMessages));
 
-                    // 7. Label processed messages and mark as read
+                    // 8. Label processed messages and mark as read
                     if (processedLabelId != null) {
                         applyProcessedLabel(gmail, request.userId, messageIds, processedLabelId);
                     }
