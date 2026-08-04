@@ -70,6 +70,109 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
     public static final String PROMPT_VERSION = "v1";
 
     // -----------------------------------------------------------------------
+    // Prompt templates (B0 — docs/decisions/BRIEF_provenance_stamping.md)
+    //
+    // The prompts live here as constants rather than inline in their node lambdas so their
+    // text can be HASHED. promptVersion is the hash of the TEMPLATE, never of the rendered
+    // prompt: the extract prompt interpolates today's date, so hashing the render would mint
+    // a new version every calendar day and make the field noise. The template hash changes if
+    // and only if the prompt logic changes — which is the entire point of the field.
+    //
+    // Runtime values are {{PLACEHOLDERS}}, substituted by the render* methods below. The
+    // constants themselves contain no runtime data.
+    //
+    // These are byte-identical to the inline concatenations they replaced; that is enforced by
+    // PromptTemplateByteIdentityTest, which holds the pre-refactor text as a frozen reference.
+    // -----------------------------------------------------------------------
+
+    public static final String CLASSIFY_PROMPT_TEMPLATE = "Classify this email along three independent dimensions. "
+        + "Reply with only valid JSON, no markdown fences:\n"
+        + "{\"category\": \"SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN\", "
+        + "\"silo\": \"VAULT|OFFICE|STUDIO|UNKNOWN\", "
+        + "\"intent\": \"ACTION_REQUIRED|DECISION_NEEDED|FYI|SCHEDULING|UNKNOWN\"}\n\n"
+        + "category: what the event IS.\n"
+        + "silo: which life domain it belongs to — VAULT (personal/family: logistics, "
+        + "medical, private financial, household), OFFICE (business: clients, operations, "
+        + "strategy, business correspondence), STUDIO (creative/public: art, music, "
+        + "content, cultural projects, public-facing work).\n"
+        + "intent: what the email asks of you — ACTION_REQUIRED (must do something: "
+        + "sign, pay, reply, attend), DECISION_NEEDED (must choose before anything can "
+        + "proceed), FYI (awareness only, nothing required), SCHEDULING (primarily a "
+        + "calendar/time-coordination matter).\n"
+        + "Use UNKNOWN for any dimension you are not confident about — never guess.\n\n"
+        + "{{BODY}}";
+
+    public static final String EXTRACT_PROMPT_TEMPLATE = "Today's date is {{TODAY}}. All dates should be in 2026 unless explicitly stated otherwise. "
+        + "Extract structured data from this email. "
+        + "Reply with only valid JSON, no markdown fences:\n"
+        + "{\"title\": \"short title\", "
+        + "\"startTime\": \"ISO-8601 datetime or null\", "
+        + "\"deadline\": \"ISO-8601 datetime or null\", "
+        + "\"childName\": \"first name of child or student mentioned, or null\", "
+        + "\"relations\": [{\"relation\": \"MENTIONS_PERSON|PART_OF|LOCATED_AT|ACTION_NEEDED|UNKNOWN\", "
+        + "\"objectType\": \"PERSON|ORG|PLACE|PROJECT|UNKNOWN\", \"object\": \"the mentioned name\"}]}\n\n"
+        + "For childName: extract any student or child first name explicitly mentioned "
+        + "(e.g. 'Billy', 'Emma'). Use null if no specific child is named.\n\n"
+        + "For relations: emit one entry per distinct person, organization, place, or "
+        + "project explicitly mentioned in the email. relation describes how it connects "
+        + "to this email's event — MENTIONS_PERSON (a person is named), PART_OF (this "
+        + "event/task is part of a larger project or effort), LOCATED_AT (a place is "
+        + "where this happens), ACTION_NEEDED (this specific person needs to take "
+        + "action, distinct from merely being mentioned). objectType is what kind of "
+        + "thing \"object\" is. Use UNKNOWN for either field only when genuinely "
+        + "uncertain — never guess. Omit relations entirely (empty array) if nothing "
+        + "qualifies.\n\n"
+        + "{{BODY}}";
+
+    /**
+     * Substitutes {{BODY}}. Body is substituted LAST everywhere so that untrusted email text
+     * containing a literal placeholder cannot be re-substituted into.
+     */
+    public static String renderClassifyPrompt(String body) {
+        return CLASSIFY_PROMPT_TEMPLATE.replace("{{BODY}}", body);
+    }
+
+    /** Substitutes {{TODAY}} then {{BODY}} — body last, for the reason above. */
+    public static String renderExtractPrompt(String today, String body) {
+        return EXTRACT_PROMPT_TEMPLATE.replace("{{TODAY}}", today)
+                                      .replace("{{BODY}}", body);
+    }
+
+    /**
+     * Short content hash of a prompt template: SHA-256, first 12 lowercase hex chars.
+     *
+     * This is the mechanism that will REPLACE the hand-bumped PROMPT_VERSION = "v1" above.
+     * As of B0 it is computed but not yet stamped onto records — switching the stamp is B1,
+     * so that B0 remains a strictly behavior-preserving refactor with nothing to detect but
+     * the prompt text itself.
+     *
+     * Why hash rather than hand-bump: a version field that depends on a human remembering to
+     * bump it fails silently, and a silent failure here corrupts the exact model-comparison
+     * this provenance work exists to enable. Deriving it from the text makes the bump
+     * structural rather than a promise.
+     */
+    private static String promptHash(String template) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                                .digest(template.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(12);
+            for (int i = 0; i < 6; i++) sb.append(String.format("%02x", digest[i]));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is required of every JVM by the Java spec; unreachable in practice.
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    /**
+     * Per-prompt versions (Fork 2). Two constants, not one: a single shared version cannot
+     * express "the classify prompt changed but extract-details did not", which is exactly the
+     * comparison a model/prompt regression hunt needs. Computed once at class init.
+     */
+    public static final String CLASSIFY_PROMPT_VERSION = promptHash(CLASSIFY_PROMPT_TEMPLATE);
+    public static final String EXTRACT_PROMPT_VERSION  = promptHash(EXTRACT_PROMPT_TEMPLATE);
+
+    // -----------------------------------------------------------------------
     // Classification result — passed between classify and extract-details nodes
     // -----------------------------------------------------------------------
     public enum EmailCategory {
@@ -208,22 +311,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                 (AgentNode agentNode, GmailMessage message) -> {
 
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
-                    String classifyPrompt = "Classify this email along three independent dimensions. "
-                        + "Reply with only valid JSON, no markdown fences:\n"
-                        + "{\"category\": \"SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN\", "
-                        + "\"silo\": \"VAULT|OFFICE|STUDIO|UNKNOWN\", "
-                        + "\"intent\": \"ACTION_REQUIRED|DECISION_NEEDED|FYI|SCHEDULING|UNKNOWN\"}\n\n"
-                        + "category: what the event IS.\n"
-                        + "silo: which life domain it belongs to — VAULT (personal/family: logistics, "
-                        + "medical, private financial, household), OFFICE (business: clients, operations, "
-                        + "strategy, business correspondence), STUDIO (creative/public: art, music, "
-                        + "content, cultural projects, public-facing work).\n"
-                        + "intent: what the email asks of you — ACTION_REQUIRED (must do something: "
-                        + "sign, pay, reply, attend), DECISION_NEEDED (must choose before anything can "
-                        + "proceed), FYI (awareness only, nothing required), SCHEDULING (primarily a "
-                        + "calendar/time-coordination matter).\n"
-                        + "Use UNKNOWN for any dimension you are not confident about — never guess.\n\n"
-                        + message.body;
+                    String classifyPrompt = renderClassifyPrompt(message.body);
 
                     String classifyJson = model.chat(classifyPrompt).trim();
 
@@ -274,27 +362,7 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
 
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
                     String today = java.time.LocalDate.now().toString();
-                    String extractPrompt = "Today's date is " + today + ". All dates should be in 2026 unless explicitly stated otherwise. "
-                        + "Extract structured data from this email. "
-                        + "Reply with only valid JSON, no markdown fences:\n"
-                        + "{\"title\": \"short title\", "
-                        + "\"startTime\": \"ISO-8601 datetime or null\", "
-                        + "\"deadline\": \"ISO-8601 datetime or null\", "
-                        + "\"childName\": \"first name of child or student mentioned, or null\", "
-                        + "\"relations\": [{\"relation\": \"MENTIONS_PERSON|PART_OF|LOCATED_AT|ACTION_NEEDED|UNKNOWN\", "
-                        + "\"objectType\": \"PERSON|ORG|PLACE|PROJECT|UNKNOWN\", \"object\": \"the mentioned name\"}]}\n\n"
-                        + "For childName: extract any student or child first name explicitly mentioned "
-                        + "(e.g. 'Billy', 'Emma'). Use null if no specific child is named.\n\n"
-                        + "For relations: emit one entry per distinct person, organization, place, or "
-                        + "project explicitly mentioned in the email. relation describes how it connects "
-                        + "to this email's event — MENTIONS_PERSON (a person is named), PART_OF (this "
-                        + "event/task is part of a larger project or effort), LOCATED_AT (a place is "
-                        + "where this happens), ACTION_NEEDED (this specific person needs to take "
-                        + "action, distinct from merely being mentioned). objectType is what kind of "
-                        + "thing \"object\" is. Use UNKNOWN for either field only when genuinely "
-                        + "uncertain — never guess. Omit relations entirely (empty array) if nothing "
-                        + "qualifies.\n\n"
-                        + message.body;
+                    String extractPrompt = renderExtractPrompt(today, message.body);
                     String json = model.chat(extractPrompt).trim();
 
                     String title     = message.emailSubject != null

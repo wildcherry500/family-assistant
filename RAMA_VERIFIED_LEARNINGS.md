@@ -662,6 +662,43 @@ liability.** Local-mode tests cannot catch it, because local mode runs in the pr
 
 ---
 
+### Any value participating in a deterministic ID must be stamped into the depot payload at append time — never computed inside the topology
+
+VERIFIED FACT (Rama 1.5.0). Recorded 2026-08-03, from the Phase A audit for
+`docs/decisions/BRIEF_provenance_stamping.md`. This is the general rule behind the existing
+`mintEntityId`/`mintCommitmentId` discipline, stated once so it stops being rediscovered
+per-feature.
+
+**The rule.** A PState materialized by a stream topology is recomputable: re-draining the depot
+must reproduce it exactly. Therefore every input to a deterministic ID must come from the depot
+record itself. The moment an ID incorporates a value computed *inside* the topology —
+`System.currentTimeMillis()`, `LocalDate.now()`, anything ambient — the ID changes on every
+redrain, and any structure keyed by it (supersession chains, parent/child links, dedup sets) is
+silently destroyed and rebuilt as duplicates.
+
+**How it nearly bit us.** `DECISION_temporal_model.md` §2.2 specifies
+`edgeId = hash(subject, relation, object, assertedAt)`. That is correct *only* if `assertedAt`
+is depot data. Stamped at append time in the agent node and read back in the topology, the
+edgeId is a pure function of the record and redrain reproduces it. Computed in the topology, the
+same source email yields a different edgeId on every redrain — every `supersededBy` pointer
+dangles, and the assertion history the field exists to preserve is exactly what gets lost.
+
+**Existing code this rule already explains.** `FamilySchemaModule.mintEntityId` and
+`mintCommitmentId` both hash only record-sourced fields and both use `UUID.nameUUIDFromBytes`,
+never `randomUUID` — same requirement, one instance of it. `$$commitments.createdAt` is fed from
+the event record's `created` (`FamilySchemaModule.java:276`), not from a topology-side clock,
+which is why redraining an unchanged event does not churn commitment creation time.
+
+**Underlying platform requirement:** `redplanetlabs.com/docs/~/operating-rama.html` ("Task
+scaling") — PStates recomputed from depot data require deterministic processing. Cited in
+`FamilySchemaModule.java:85-87`.
+
+**Practical form:** if a topology needs a timestamp for anything an ID depends on, the timestamp
+is the *appender's* job. Stamp it into the payload; read it with `.select(..., Path.key("..."))`.
+`Gate 9` of `docs/PLAN_REVIEW_GATE.md` is the check for this.
+
+---
+
 ## Unverified — do not use without confirming
 
 ### OPEN INVESTIGATION: does `rama.yaml`'s `worker.child.opts` apply to CLI-deployed modules at all?

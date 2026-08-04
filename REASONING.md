@@ -3082,3 +3082,110 @@ Roughly 30 minutes were available. Tasks 1 and 2 plus the suite fit; a two-modul
 fit reliably — the last cluster update on this box got watchdog-killed mid-handover and needed diagnosis.
 Starting a module update that cannot be watched to completion is strictly worse than not starting one. Repo
 left green at 152/152 with the deploy as the next session's first action.
+
+---
+
+## 2026-08-03 — Phase A audit: the must-land test was wrong, and the baseline was not what the handoff said
+
+### DECISION_temporal_model.md §6 over-scoped the must-land list
+
+§6 sorts schema work by "captured at parse time or lost forever." That test is wrong for this
+codebase, and the audit is what exposed it.
+
+**The correct test is "not reconstructable by depot redrain," not "not captured at parse time."**
+
+The difference is `*raw-emails`. It is a genuine write-ahead archive: `persist-raw`
+(`EmailParsingModule.java:194-197`) appends the complete raw email with `AckLevel.APPEND_ACK`
+*before* any parsing happens. So anything an LLM can re-extract from a stored raw email is not
+lossy — it is recoverable by re-draining the archive through a newer parser. That is the entire
+point of having built the depot.
+
+Applying the corrected test to §6's list:
+
+- **Provenance fields, `assertedAt`/`eventTime` split, actor attribution** — genuinely must land.
+  Provenance describes the derivation itself; a redrain produces *new* provenance, not the old
+  record's. `assertedAt` is when the system came to believe something — a redrain cannot
+  reconstruct the original belief time. Actor is who caused a transition, and transitions live in
+  `*commitment-status-changes` as permanent event-sourced records, not recomputed state.
+- **Trigger preservation and held-as-default (B5)** — do NOT need to land pre-ingestion. Both are
+  prompt changes. A when-clause dropped by today's parse is still sitting in the raw email body;
+  re-drain with the improved prompt and it comes back. §6 called these "lossy-if-skipped," which
+  is true of a system without a raw archive and false of this one.
+- **Relation edge assertions (B3)** — also do not need to land pre-ingestion, for a different
+  reason. Edges are a materialized view over `*family-events`, not permanent records: the stream
+  topology recomputes `$$edges-forward`/`$$edges-inverse`/`$$entities` from each record's
+  `relations` field on every drain. So `$$edge-assertions` rebuilds by redrain too — provided the
+  depot record carries `assertedAt` and the relation triples, both of which are true once B2
+  lands. §2's "retrofitting supersession onto live edges is a migration" assumed edges were
+  permanent records. They are not.
+
+Net effect: B3, B5 and Fork 4 (the relation cardinality registry) defer to the edge-schema work.
+This session's scope reduced to step 0, B0, B1, B2, B4.
+
+The general lesson is that a write-ahead archive changes what "irreversible" means. §6 was
+written against the *category* of decision (schema-shaped, cheap now, expensive later) rather
+than against this system's actual replay capability. Both docs are otherwise sound; this is a
+scoping correction, not a reversal.
+
+### C1 — the temporal doc's edgeId formula was not redrain-safe
+
+§2.2 specifies `edgeId = hash(subject, relation, object, assertedAt)`. Correct only if
+`assertedAt` is depot data. Computed in the topology with `currentTimeMillis()`, every redrain
+mints different edgeIds and the supersession chain the field exists to preserve is destroyed.
+Promoted to a general rule in `RAMA_VERIFIED_LEARNINGS.md` ("Any value participating in a
+deterministic ID must be stamped into the depot payload at append time"), since it is the same
+requirement `mintEntityId`/`mintCommitmentId` already satisfy without ever having stated it.
+
+### The 152/152 baseline was inherited, and it was wrong
+
+The handoff records 152/152 non-LLM green. Observed this session: **151/152**.
+`GmailIngestionTest.testGmailToFamilyData` errors with `Executor pool is shut down` — the same
+`InProcessCluster`-lifecycle-across-test-classes failure mode already documented for
+`ZooEmailTest`, and confirmed order-dependent here: the test **passes in isolation** (65s, live
+Gmail fetch succeeds) and fails only in full-suite position.
+
+Two things worth keeping:
+
+1. **That test cannot skip under Maven, ever.** `pom.xml:96` passes
+   `<GEMINI_API_KEY>${env.GEMINI_API_KEY}</GEMINI_API_KEY>`. With the env var unset, Maven
+   substitutes nothing and the child JVM receives the **literal string**
+   `${env.GEMINI_API_KEY}` — which is non-null, so `assumeTrue` at `GmailIngestionTest.java:65`
+   always passes and the test always runs. The handoff's "no `GEMINI_API_KEY` required / skips
+   gracefully" claim is false for this test. Verified by re-running with `env -u GEMINI_API_KEY`:
+   `Skipped: 0`, same failure.
+2. `GmailIngestionTest` is tagged `gmail`, not `llm`, so `excluded.groups=llm` never excludes it.
+
+Not fixed — out of scope, and it is test infrastructure rather than parsing logic. Recorded so
+the next session does not re-derive it or trust the inherited number.
+
+### B0 — why the byte-identity gate was built the way it was
+
+The brief requires proving the extracted templates render byte-identical output to the inline
+concatenation they replaced. The obvious implementation — hand-copy the old prompt text into the
+test as the reference — has a hole: an identical transcription slip in both the test copy and the
+production template makes the gate pass while the prompt has in fact changed. That is precisely
+the failure the gate exists to prevent, so it was worth avoiding structurally.
+
+Instead the legacy reference in `PromptTemplateByteIdentityTest` was generated **mechanically**
+from commit `4dc6582`'s `EmailParsingModule.java` (lines 211-226 and 277-297) via three purely
+textual edits — declaration to `return`, `message.body` to `body`, dedent — with the source
+snippet md5s recorded in the test's header comment. The production templates were generated from
+the same extracted snippets by the same method. Neither side was retyped.
+
+The gate was then **mutation-tested**: changing one character in the classify template
+(`IS.` to `Is.`) made it fail, and reverting made it pass. A green gate that has never been shown
+to fail is not evidence.
+
+Result: 4/4 green, full suite 156 run / 155 pass / 1 pre-existing error, zero regressions.
+
+`PROMPT_VERSION = "v1"` deliberately still stands and is still what gets stamped. B0 adds the
+hash mechanism (`CLASSIFY_PROMPT_VERSION`, `EXTRACT_PROMPT_VERSION`, per-prompt per Fork 2) but
+does not switch the stamp — that is B1. Keeping the switch out of B0 is what makes B0 a strictly
+behavior-preserving refactor with nothing to detect but the prompt text itself.
+
+### Correction recorded in code
+
+`FamilySchemaModule.java:415` claimed "actor is durably captured in this depot's own replay log."
+It never was — no append site has ever written an `actor` field, and `WebhookReceiver.markDone`
+appends exactly `{familyId, commitmentId, newStatus, changedAt}`. Comment corrected to describe
+actual behavior and point at B4 as planned work.

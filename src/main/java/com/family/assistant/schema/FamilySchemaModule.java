@@ -412,8 +412,13 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         // stays on the accepted-risk list, since that commitment DID exist at creation time).
         // $$commitments-by-status is still out of scope (Layer 3) — this guard only needs a
         // presence check, not the old status value, so it doesn't require that index either.
-        // "actor" is durably captured in this depot's own replay log but not projected into
-        // $$commitments this session — nothing consumes it yet.
+        // NOTE (2026-08-03 audit correction): an earlier version of this comment claimed
+        // "actor is durably captured in this depot's own replay log but not projected into
+        // $$commitments." That was never true — no append site has ever written an "actor"
+        // field. The only producer is WebhookReceiver.markDone, whose payload is
+        // {familyId, commitmentId, newStatus, changedAt} and nothing else. Actor attribution
+        // (actor / actorBasis) is planned work, not existing behavior — see
+        // docs/decisions/PLAN_provenance_temporal.md step B4.
         //
         // This MUST be a second .source(...) branch on the SAME "stream" topology object
         // that declared $$commitments (family-events-stream) — a PState can only be
