@@ -557,4 +557,99 @@ precisely why it must be stamped now rather than derived later.
 
 ---
 
+## VERIFY-BEFORE-WIRING RESULTS (2026-08-09) — three checklist claims checked at source, two are WRONG
+
+The go-live checklist asked for two of these to be confirmed before B1/B2 wiring. Both
+confirmations came back negative. **B1 must not be written to the checklist's stated shape.**
+
+### ❌ CONFLICT 1 — `classifyByKeyword` DOES fire on an in-schema `UNKNOWN`
+
+Checklist claim: *"`classifyByKeyword` fires only on **off-schema** model output; `UNKNOWN`
+is IN-schema and does NOT trigger it. Set `basis = "keyword"` ONLY on the off-schema
+fallback, `"model"` otherwise (including a legitimate `UNKNOWN`)."*
+
+Actual code, `EmailParsingModule.java:317-349`:
+
+```java
+String categoryStr = "UNKNOWN";                       // 318 — sentinel default
+try {
+    String cat = parsed.get("category");
+    if (cat != null && cat.toUpperCase()
+            .matches("SCHOOL_EVENT|DEADLINE|PERMISSION_SLIP|TASK|UNKNOWN")) {
+        categoryStr = cat.toUpperCase();              // 331 — UNKNOWN IS in this enum
+    }
+} catch (Exception e) { /* keep defaults */ }
+
+if ("UNKNOWN".equals(categoryStr)) {                  // 347 — fires for BOTH cases
+    categoryStr = classifyByKeyword(message.body);
+}
+```
+
+`UNKNOWN` is a member of the accepted enum, so a legitimate in-schema `UNKNOWN` assigns
+`categoryStr = "UNKNOWN"` and then **satisfies the line-347 condition**. The keyword
+classifier runs.
+
+**Root cause: the sentinel default and the valid value are the same string.** All four
+paths — model said `UNKNOWN`, model said something off-schema, `category` field missing,
+JSON parse threw — collapse to the identical `"UNKNOWN"`, so the current code **cannot
+distinguish them at line 347**. The information the checklist wants `basis` to carry does
+not exist in the code yet; B1 has to create it.
+
+**Implication for B1:** tracking must be added *alongside* the existing control flow, which
+must not change (behavior-preserving, same discipline as B0). Two closed-set fields express
+it honestly, because "what the model did" and "what decided the category" are different
+questions:
+
+| field | values | meaning |
+|---|---|---|
+| `outcome` | `ok` \| `off-schema` \| `parse-error` | what happened to the model's classify response |
+| `categoryBasis` | `model` \| `keyword` \| `none` | who actually decided the final category |
+
+`categoryBasis` is computed by comparing the category before and after line 347 — the only
+honest way to know whether the keyword rule actually changed anything. Note `none` is a real
+case: off-schema output *and* no keyword match leaves `UNKNOWN` with nothing having decided
+it. Collapsing that into `keyword` would claim a decision that was never made.
+
+### ❌ CONFLICT 2 — `created` is NOT recomputed on redrain; mirroring it is SAFE
+
+Checklist claim: *"Do NOT blindly 'mirror `created`': `created` is recomputed-on-redrain per
+our own Gate 1 note. If `assertedAt` copied that mechanism it would drift on every redrain."*
+
+`created` is computed at `EmailParsingModule.java:418` — `long now = System.currentTimeMillis();`
+— which sits **inside the `write-to-store` agent node**, not inside a topology. It is stamped
+into the payload (`eventRecord.put("created", now)`) *before* `depot.append(eventRecord)`.
+
+That is precisely the append-time-stamping discipline C1 demands, and
+`RAMA_VERIFIED_LEARNINGS.md` (Gate 9 entry, added 2026-08-03) already states the rule it
+satisfies: a value stamped into the depot payload survives redrain unchanged; only values
+computed *inside the topology* get rewritten. `FamilySchemaModule` confirms it consumes
+`created` read-only — `.select("*record", Path.key("created")).out("*eventCreatedAt")` — it
+never recomputes it.
+
+**So `created` is already write-once and redrain-stable, and `assertedAt` should use exactly
+the same mechanism.** The warning inverted the risk.
+
+**The distinction the warning was probably reaching for** is real but is a different
+operation: re-running the *parser* over `*raw-emails` (reparse-on-replay) does re-execute the
+agent node and would produce a new `created`/`assertedAt`. That is correct behavior — a
+genuinely new assertion made at a new time — and is not what "redrain" means for
+`*family-events`, where the stored payload is replayed verbatim.
+
+### ✅ CONFLICT 3 (minor) — the `llm` exclusion the checklist proposed was already in place
+
+Checklist recommendation: *"Durable fix: exclude the `llm` tag from the default Surefire run
+(`<excludedGroups>llm</excludedGroups>`)."*
+
+Already present since before this session: `pom.xml:16` set `excluded.groups` to `llm` and
+`:121` wired it to `<excludedGroups>`. So `EmailIngestionTest`, `FamilyAssistantTest`,
+`QueryAgentTest` and `CohenFamilyDatasetTest`'s tagged methods were **never** running by
+default — which also corrects an overstatement in my own previous summary that named them as
+live spend.
+
+**The actual gap was one test:** `GmailIngestionTest` is `@Tag("gmail")`, not `@Tag("llm")`,
+so nothing excluded it. Fixed 2026-08-09 by widening the default to `llm,gmail`. Live spend
+from a default `mvn test` is now zero, without depending on anyone remembering `env -u`.
+
+---
+
 **This file:** `/Users/toddkeelingfolder/CORSAIR/family_assistant/docs/decisions/PLAN_provenance_temporal.md`

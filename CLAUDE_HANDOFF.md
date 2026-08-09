@@ -15,11 +15,16 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **CURRENT (2026-08-09): 156 tests, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS**, via
-  `env -u GEMINI_API_KEY mvn test`. See "Recently Completed (2026-08-09)" for why that is
-  the correct baseline command and why plain `mvn test` still shows 1 red on this machine.
+- **CURRENT (2026-08-09): 156 run, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS.**
+  Verified twice via `env -u GEMINI_API_KEY mvn test`.
   **Every count below this line is stale** — retained only for the history of what each
   session added.
+- Late in the same session the default `excluded.groups` was widened from `llm` to
+  `llm,gmail`, which excludes `GmailIngestionTest` (the last live-spend test running by
+  default) rather than skipping it. Expected effect: a plain `mvn test` becomes the green
+  baseline with one fewer test executed and 0 skipped, making `env -u` unnecessary.
+  **⚠️ That final confirming run did not finish before the session ended — re-run
+  `mvn test` first thing next session and correct this line with the real numbers.**
 - **145/145 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
   2026-07-17 pre-deploy gate-review session (Part 1 of the first real cluster deploy:
   unknown-ID topology guard + debug-route gating — see "Recently Completed" below).
@@ -548,6 +553,50 @@ one. `worker-heap-overrides.yaml` (project root, `worker.child.opts: "-Xmx1536m"
 and reusable as a starting point on whatever platform hosts this next, though the target value
 should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
 a 24GB box.
+
+## ▶ NEXT SESSION STARTS HERE (set 2026-08-09, end of session)
+
+**State: deploy track is unblocked through D3. Code track B1 is approved but NOT started.**
+Tree is clean and committed on `feature/raw-ingestion-depot`.
+
+### Resume at: B1 — but NOT to the shape the go-live checklist specifies
+
+Two of the checklist's "confirm before wiring" items were checked at source this session and
+**came back negative**. Full evidence in `docs/decisions/PLAN_provenance_temporal.md`
+("VERIFY-BEFORE-WIRING RESULTS"). Read that before writing any B1 code:
+
+1. **`classifyByKeyword` DOES fire on an in-schema `UNKNOWN`** (the checklist says it does
+   not). `UNKNOWN` is both the sentinel default and a valid enum member, so all four paths
+   collapse to the same string and `EmailParsingModule.java:347` cannot tell them apart.
+   B1 must *create* that distinction via two closed-set fields — `outcome`
+   (`ok`/`off-schema`/`parse-error`) and `categoryBasis` (`model`/`keyword`/`none`) —
+   added alongside unchanged control flow, B0-style.
+2. **`created` is NOT recomputed on redrain** (the checklist warns that it is). It is
+   stamped at `EmailParsingModule.java:418` inside the write-to-store *agent node*, into the
+   depot payload, before `depot.append`. `assertedAt` should use exactly that mechanism.
+
+### Open question parked for next session (B1 plumbing, not a blocker)
+
+The classify node currently emits 4 values (`message, categoryStr, silo, intent`). Adding the
+derivations map needs a 5th, and **the AOR node-lambda arity limit was not confirmed** — the
+research was cut short by end of session. Two options: check the arity ceiling in
+`docs/Agent_O_Rama_Complete_Documentation.md`, or sidestep it entirely with a small
+`RamaSerializable` classification carrier (precedent: `ParsedEvent` already crosses that same
+node boundary as a POJO). The carrier avoids the question and is probably the better shape
+regardless. **Do not guess the arity** — that is the class of error CLAUDE.md warns about.
+
+### Deploy track — ready to run, nothing blocking
+
+D0 ✅ and D1 ✅ are done. D2 can proceed as written: daemons from any cwd (both now resolve
+to the clean canonical `/Users/toddkeelingfolder/rama-zk`), `--action launch` all six,
+`--configOverrides worker-heap-overrides.yaml` on every one. **D4 remains a hard stop until
+B1 + B2 land.**
+
+Cost-gate note now verified rather than assumed: the model is called **twice per email**
+(classify + extract), and `classifyByKeyword` does **not** save a call — it runs *after* the
+classify call has already been made and billed. Price the backlog at `count × 2` calls.
+
+---
 
 ## OAuth Token Durability — RESULT (2026-08-09)
 

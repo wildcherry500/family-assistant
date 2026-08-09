@@ -13,7 +13,12 @@
     <maven.compiler.source>21</maven.compiler.source>
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <excluded.groups>llm</excluded.groups>
+    <!-- Tags excluded from a default `mvn test`. "llm" was already here; "gmail" added
+         2026-08-09 because GmailIngestionTest is tagged @Tag("gmail"), NOT @Tag("llm"),
+         so it was the one live-spend test still running by default — a real Gmail fetch
+         plus up to 2 Gemini calls per fetched message, before the D4 cost gate. Opt back
+         in explicitly: mvn test -Dexcluded.groups=llm   (or -Dexcluded.groups= for all). -->
+    <excluded.groups>llm,gmail</excluded.groups>
 
     <!-- Empty by default. Maven does NOT substitute an unset ${env.X} — it passes the
          literal string "${env.GEMINI_API_KEY}" through, which is non-null, so every
