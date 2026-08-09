@@ -58,11 +58,30 @@ public class GmailIngestionTest {
         if (ipc != null) ipc.close();
     }
 
+    /**
+     * True only when a usable Gemini key is present.
+     *
+     * Rejects three things, not one:
+     *   - null                         — the obvious case
+     *   - blank                        — what the pom now passes when the env var is unset
+     *   - a literal "${...}"           — what the pom passed BEFORE the 2026-08-09 fix.
+     *
+     * The third check is deliberate belt-and-braces: an unresolved Maven placeholder is
+     * non-null and non-blank, so it satisfied the old `!= null` guard and this test ran
+     * with a garbage key on every `mvn test`. Keeping the check here means reverting the
+     * pom cannot silently un-fix this.
+     */
+    private static boolean hasRealApiKey() {
+        String key = System.getProperty("GEMINI_API_KEY", System.getenv("GEMINI_API_KEY"));
+        return key != null
+            && !key.isBlank()
+            && !(key.startsWith("${") && key.endsWith("}"));
+    }
+
     @Test
     @Tag("gmail")
     public void testGmailToFamilyData() throws Exception {
-        assumeTrue(System.getProperty("GEMINI_API_KEY", System.getenv("GEMINI_API_KEY")) != null,
-            "Skipping: GEMINI_API_KEY not set");
+        assumeTrue(hasRealApiKey(), "Skipping: GEMINI_API_KEY not set");
 
         System.out.println("[GmailIngestionTest] Fetching up to 5 unread messages from Gmail...");
 

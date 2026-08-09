@@ -14,7 +14,29 @@
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <excluded.groups>llm</excluded.groups>
+
+    <!-- Empty by default. Maven does NOT substitute an unset ${env.X} — it passes the
+         literal string "${env.GEMINI_API_KEY}" through, which is non-null, so every
+         `assumeTrue(key != null)` guard passed and LLM/Gmail tests ran with a garbage
+         key instead of skipping. The gemini-key profile below overrides this only when
+         the env var is genuinely set. (Found 2026-08-03, fixed 2026-08-09.) -->
+    <gemini.api.key></gemini.api.key>
   </properties>
+
+  <profiles>
+    <!-- Activates only when GEMINI_API_KEY is actually present in the environment. -->
+    <profile>
+      <id>gemini-key</id>
+      <activation>
+        <property>
+          <name>env.GEMINI_API_KEY</name>
+        </property>
+      </activation>
+      <properties>
+        <gemini.api.key>${env.GEMINI_API_KEY}</gemini.api.key>
+      </properties>
+    </profile>
+  </profiles>
 
   <repositories>
     <repository>
@@ -94,7 +116,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <environmentVariables>
-            <GEMINI_API_KEY>${env.GEMINI_API_KEY}</GEMINI_API_KEY>
+            <GEMINI_API_KEY>${gemini.api.key}</GEMINI_API_KEY>
           </environmentVariables>
           <excludedGroups>${excluded.groups}</excludedGroups>
         </configuration>

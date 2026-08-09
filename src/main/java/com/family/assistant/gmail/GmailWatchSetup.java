@@ -77,6 +77,11 @@ public class GmailWatchSetup {
     }
 
     public static void main(String[] args) throws Exception {
+        // Interactive entry point: a human is present, so a browser consent flow is
+        // answerable here. Set on main() and NOT inside renewWatch(), so that any
+        // future non-interactive caller of renewWatch() still fails loudly rather
+        // than hanging on a browser flow. See GmailService.tokensDirectory().
+        GmailService.allowInteractiveConsent();
         System.out.println("Connecting to Gmail...");
         WatchResponse response = renewWatch();
         System.out.println();

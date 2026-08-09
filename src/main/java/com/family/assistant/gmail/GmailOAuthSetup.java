@@ -23,6 +23,9 @@ import com.google.api.services.gmail.Gmail;
 public class GmailOAuthSetup {
 
     public static void main(String[] args) throws Exception {
+        // The one entry point whose entire purpose is the browser consent flow —
+        // it must be allowed to run with no StoredCredential present.
+        GmailService.allowInteractiveConsent();
         System.out.println("[GmailOAuthSetup] Starting OAuth consent flow...");
         System.out.println("[GmailOAuthSetup] A browser window will open. "
             + "Callback listener binds 127.0.0.1:8888.");

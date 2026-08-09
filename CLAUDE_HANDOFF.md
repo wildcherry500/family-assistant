@@ -15,6 +15,11 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
+- **CURRENT (2026-08-09): 156 tests, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS**, via
+  `env -u GEMINI_API_KEY mvn test`. See "Recently Completed (2026-08-09)" for why that is
+  the correct baseline command and why plain `mvn test` still shows 1 red on this machine.
+  **Every count below this line is stale** — retained only for the history of what each
+  session added.
 - **145/145 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
   2026-07-17 pre-deploy gate-review session (Part 1 of the first real cluster deploy:
   unknown-ID topology guard + debug-route gating — see "Recently Completed" below).
@@ -543,6 +548,122 @@ one. `worker-heap-overrides.yaml` (project root, `worker.child.opts: "-Xmx1536m"
 and reusable as a starting point on whatever platform hosts this next, though the target value
 should be reconsidered once real headroom is available rather than assumed to be depend on rescuing
 a 24GB box.
+
+## OAuth Token Durability — RESULT (2026-08-09)
+
+- Aug 2 re-authed token tested on Aug 9 (exactly 7 days later) via `GmailWatchSetup`.
+- Refreshed silently — no browser, no `invalid_grant`. Watch registered:
+  **historyId=6420017, expires Sun Aug 16 2026.**
+- Conclusion: token survived past the 7-day mark → the recurring `invalid_grant`/
+  7-day-expiry cycle is broken for this credential.
+- Still open: root cause of the PREVIOUS (pre-Aug-2) token death remains UNKNOWN;
+  the ~100-refresh-token rotation limit is the leading candidate. This run does
+  not stress that path.
+
+Physical location confirmed by this run: the credential refreshed from
+`<project-root>/tokens` (`tokens/StoredCredential`, 1179 bytes, mtime Aug 9 15:56),
+with the process started from the project root. That confirmation is what unblocked
+pinning the token path absolute (D1 below).
+
+---
+
+## Recently Completed (2026-08-09) — D1 deploy blocker: cwd overload killed at the root; suite honestly green
+
+### The ZK half — `local-zk` is a hardcoded relative literal, so configuration cannot fix it
+
+The 2026-08-02 entry below diagnosed the symptom correctly but assumed the data directory
+was configurable. It is not. Verified by disassembling the actual 1.5.0 jar:
+`rama devZookeeper` calls
+`(mk-inprocess-zookeeper {:port <config ZOOKEEPER-PORT> :local-dir "local-zk"})`, where
+**only `:port` comes from config** and `"local-zk"` is a compile-time constant resolved
+against the launching process's cwd. No CLI flag, no `rama.yaml` key, no `-D` property.
+Full bytecode evidence in `RAMA_VERIFIED_LEARNINGS.md`.
+
+**Fix applied — symlink, not discipline.** One canonical absolute dataset at
+`/Users/toddkeelingfolder/rama-zk`, with each candidate cwd's `local-zk` replaced by a
+symlink to it. This makes a wrong-cwd launch *impossible* rather than merely discouraged,
+which a "always start daemons from the project root" rule never could.
+
+- `family_assistant/local-zk` → symlink to `/Users/toddkeelingfolder/rama-zk` ✓
+- `~/rama-release/local-zk` → symlink to `/Users/toddkeelingfolder/rama-zk` ✓
+- April dataset archived (moved, not deleted) to
+  `family_assistant/local-zk.archive-april-2026-08-09` (460 KB)
+- July dataset archived (moved, not deleted) to
+  `~/rama-release/local-zk.archive-july-2026-08-09` (4.6 MB)
+- `/Users/toddkeelingfolder/rama-zk` is **empty** — a clean dataset, per the decision below
+
+Both cwds now resolve to the same physical dataset, so **which directory the daemons are
+started from no longer selects a cluster.** Verified: `readlink` on both returns
+`/Users/toddkeelingfolder/rama-zk`.
+
+**Do not confuse `local-zk` with `local.dir`.** They are independent. `local.dir`
+(`~/rama-data`, configurable in `rama.yaml`) holds PStates/RocksDB, depot replica logs and
+module JARs; `local-zk` holds only cluster metadata. Re-verified 2026-08-09: `~/rama-data`
+is **12 KB with zero RocksDB artifacts** (no `.sst`, no `CURRENT`, empty `conductor/jars`).
+
+### The `tokens/` half — pinned absolute, and the silent failure made loud
+
+`GmailService.java` no longer uses `new File("tokens")`. It now resolves an absolute
+directory (default `/Users/toddkeelingfolder/CORSAIR/family_assistant/tokens`, overridable
+via the `FA_TOKENS_DIR` env var) and **refuses three things that used to look like success**:
+
+1. a non-absolute override — that would reintroduce the cwd bug
+2. a missing directory
+3. a missing `StoredCredential` **unless** interactive consent is explicitly enabled
+
+Check 3 is the important one: a cluster worker cannot answer a browser OAuth flow, so the
+old behavior was a hang on `127.0.0.1:8888` *after* startup had already reported success.
+`GmailOAuthSetup` and `GmailWatchSetup` opt in via `GmailService.allowInteractiveConsent()`
+in their `main()` — deliberately in `main()`, not inside `renewWatch()`, so a future
+non-interactive caller of `renewWatch()` still fails loudly. The resolved token dir and
+whether the credential is present are now printed on every authorize.
+
+### Test baseline — corrected, and now honestly green
+
+**Actual current baseline: 156 tests, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS**
+(verified 2026-08-09 with `env -u GEMINI_API_KEY mvn test`).
+
+Two prior numbers in this file were wrong. The "145/145" at the top and the
+"151/152" quoted for this session are both stale: B0 added 4 tests, and the real count is
+**156**. The `06fa488` commit message's "156 run, 155 pass" was the accurate figure.
+
+`pom.xml`'s `<GEMINI_API_KEY>${env.GEMINI_API_KEY}</GEMINI_API_KEY>` is fixed. Maven does
+not substitute an unset `${env.X}` — it passed the **literal string** through, which is
+non-null, so every `assumeTrue(key != null)` guard passed and the test ran with a garbage
+key instead of skipping. Now an empty default property is overridden by a `gemini-key`
+profile that activates only when the env var is genuinely present.
+`GmailIngestionTest`'s guard was hardened in the same pass to reject null, blank, **and** a
+literal `${...}` — so reverting the pom cannot silently un-fix this.
+
+**⚠️ Caveat — this does NOT make plain `mvn test` green on this machine.** `GEMINI_API_KEY`
+is exported from `~/.zshrc` (real key, 53 chars), so in a normal shell the guard passes
+legitimately, `GmailIngestionTest.testGmailToFamilyData` runs, and it still hits the known
+"Executor pool is shut down" InProcessCluster ordering defect (passes in isolation, fails
+in full-suite position). That defect is untouched and still pre-existing.
+
+**Use `env -u GEMINI_API_KEY mvn test` as the routine baseline command.** Two reasons: it
+is the only way to get an honest all-green signal during the deploy, and a plain `mvn test`
+makes **real Gemini calls and a real Gmail fetch** (`EmailIngestionTest`,
+`FamilyAssistantTest`, `GmailIngestionTest`) — uncontrolled spend that should not be
+happening before the D4 cost gate.
+
+### RESOLVED (Tor, 2026-08-09) — canonical ZK starts CLEAN
+
+The go-live checklist's D2 said "start daemons (real July metadata dataset from
+`~/rama-release`)" **and** "`--action launch` (NOT update) all six modules." Those two
+cannot both hold: if the July dataset were reused, the six modules from Jul 31 are already
+registered in it and `--action launch` is rejected for an existing module name.
+
+**Decision: clean dataset + `--action launch`** — consistent with the 2026-08-02 Option 1
+lock and with D2's own action bullet. Rationale: the July ZK metadata is orphaned
+regardless. It describes six module instances whose JARs and worker state no longer exist
+anywhere in `~/rama-data` (12 KB, zero RocksDB artifacts, empty `conductor/jars`), so
+launching against it would produce modules with no backing data. Nothing real is lost —
+module JARs rebuild from the fat jar and the PStates were empty by definition.
+
+Both datasets remain on disk as archives, so this is reversible.
+
+---
 
 ## Next Task (set 2026-08-02) — BLOCKER FOUND: cwd is overloaded (ZK dataset vs `tokens/`). Nothing deployed.
 

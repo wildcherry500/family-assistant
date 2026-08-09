@@ -44,7 +44,11 @@ tokens/
 
 ### Runtime artifacts ###
 hs_err_pid*.log
-local-zk/
+# No trailing slash: local-zk is now a SYMLINK to the canonical absolute dataset
+# (/Users/toddkeelingfolder/rama-zk), and "local-zk/" matches directories only.
+local-zk
 logs/
 height,
 width,
+# Archived Rama ZK datasets (see CLAUDE_HANDOFF.md 2026-08-09)
+local-zk.archive-*

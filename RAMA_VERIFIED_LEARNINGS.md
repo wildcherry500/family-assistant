@@ -660,6 +660,59 @@ started from the project root, the trap was merely dormant, not absent — a clo
 **General form of the rule: any relative path in code that runs inside a Rama module is a cluster-mode
 liability.** Local-mode tests cannot catch it, because local mode runs in the process the developer started.
 
+**UPDATE 2026-08-09 — the "start the Supervisor from the project root" mitigation is NOT zero-cost, and is
+now superseded.** It collides with `rama devZookeeper`, which selects its dataset from cwd (next entry). One
+setting was silently controlling two unrelated things that wanted opposite values. `GmailService` now pins
+its token directory to an absolute path (`FA_TOKENS_DIR` env override, absolute-only, with a fail-fast when
+`StoredCredential` is missing and interactive consent has not been explicitly allowed). Pin the path; do not
+rely on remembering the cwd.
+
+---
+
+### `rama devZookeeper` hardcodes a RELATIVE `local-zk` data directory — there is no config key and no CLI flag
+Status: VERIFIED 2026-08-09 by disassembling the actual 1.5.0 jar (`javap -c`), not from docs or Chat-o-rama.
+
+`rama devZookeeper` writes its ZooKeeper dataset to the literal relative path `local-zk`, resolved against the
+**cwd of the process that launched it**. Decompiled from
+`rpl/rama/distributed/command/dev_zookeeper$_main.class` in `~/rama-release/rama.jar`:
+
+```
+40: ldc  #76   // String port        <- :port     keyword
+52: ldc  #84   // String local-dir   <- :local-dir keyword
+61: ldc  #48   // String local-zk    <- the VALUE, a hardcoded literal
+64: invokestatic  RT.mapUniqueKeys
+67: invokeinterface IFn.invoke       <- mk-inprocess-zookeeper {:port .. :local-dir "local-zk"}
+```
+
+Effectively `(mk-inprocess-zookeeper {:port <config ZOOKEEPER-PORT> :local-dir "local-zk"})`.
+
+**Only `:port` is read from configuration** (`rpl.rama.distributed.config/ZOOKEEPER-PORT`). The data directory
+is a compile-time constant. Confirmed absent from the launcher too: the `dev_zookeeper` function in the `rama`
+CLI script passes only logging/heap JVM opts and no `-D` for a data dir, and `rama.yaml` is read from
+`RAMA_DIR` (the release directory, via the classpath) rather than from cwd — so `rama.yaml` cannot influence
+it either.
+
+**Consequence:** every `rama devZookeeper` invocation from a different directory silently creates or selects a
+**different cluster**. This actually happened here — a 2026-08-02 run from the project root pointed the cluster
+at an abandoned April dataset, and all six deployed modules read `NOT_ALIVE`. Nothing was broken; the daemons
+were simply looking at a ZooKeeper that had never heard of the July deployments.
+
+**Fix, since configuration cannot do it:** make the relative path resolve to a fixed location regardless of
+cwd, by replacing each candidate `local-zk` with a **symlink** to one canonical absolute dataset:
+
+```bash
+ln -s /Users/toddkeelingfolder/rama-zk <cwd>/local-zk
+```
+
+A symlink is strictly stronger than a wrapper script that `cd`s first, because it makes the wrong-cwd launch
+*impossible* rather than merely discouraged. ZooKeeper opens its files by path, so the link resolves at open
+time and journaling/locking behave normally.
+
+**Do not confuse this dataset with `local.dir`** (`rama.yaml`, `/Users/toddkeelingfolder/rama-data`). They are
+independent: `local.dir` holds PState/RocksDB data, depot replica logs, and module JARs, and IS configurable.
+`local-zk` holds only cluster metadata. A coherent cluster needs both to be in agreement — an empty `local.dir`
+paired with a ZK dataset that lists deployed modules is an incoherent starting state.
+
 ---
 
 ### Any value participating in a deterministic ID must be stamped into the depot payload at append time — never computed inside the topology

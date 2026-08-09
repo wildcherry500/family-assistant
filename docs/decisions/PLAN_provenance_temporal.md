@@ -405,4 +405,156 @@ baseline being re-established green before step 1.
 
 ---
 
+## FORK 1 LOCKED → (b) nested `derivations` map (Tor, 2026-08-09) — gate answers
+
+Baseline precondition from Gate 10 is now satisfied: **156 tests, 0 failures, 0 errors,
+1 skipped, BUILD SUCCESS** (`env -u GEMINI_API_KEY mvn test`, 2026-08-09). The "152/152"
+figure quoted in Gate 10 was stale — see `CLAUDE_HANDOFF.md`.
+
+### Gate 3 — record construction: **PASS as-is, but the stated premise does not apply**
+
+The gate asks that the nested map be built key-by-key via sequential `localTransform`
+rather than assembled as one `HashMap` and written with `termVal`. **`derivations` is never
+a PState partial-write target at all**, so neither construction style applies to it:
+
+1. `EmailParsingModule` builds `eventRecord` (a plain `HashMap`) and calls
+   `depot.append(eventRecord)` on `*family-events`.
+2. `FamilySchemaModule.java:279` writes the **whole record** in one shot:
+   `.localTransform("$$family-data", Path.key("*familyId").key("events").key("*eventId").termVal("*record"))`.
+
+`derivations` is therefore one more key on a **depot payload** — the same shape as
+`modelId`/`promptVersion` (2026-08-01) and `relations` (2026-07-15) before it.
+
+The `termVal` trap fires only when a value is *both* assembled as one `Map` *and* later
+targeted by a narrower write that navigates inside it. Re-verified 2026-08-09:
+
+```
+$ grep -rn 'localTransform("$$family-data"' src/main/java
+src/main/java/com/family/assistant/schema/FamilySchemaModule.java:279
+```
+
+Exactly one writer. No later, narrower write navigates into a stored event record.
+(Contrast `$$commitments`, which *does* take later partial writes for `status`/`updatedAt`
+and correctly uses sequential `localTransform` calls for exactly that reason.)
+
+Forcing sequential `localTransform` for `derivations` today would mean decomposing the
+single whole-record write that every existing field depends on — strictly more risk, no
+benefit.
+
+**Invariant this verdict rests on, and which B1 must not break:** the moment anyone adds a
+second, narrower write into `$$family-data` — e.g.
+`Path.key(fam).key("events").key(id).key("derivations").key("classify")…` — the
+whole-record `termVal` becomes the Gate 3 trap and must be decomposed *first*. Worth a
+comment at `FamilySchemaModule.java:279` saying so.
+
+### Gate 4 — serialization boundary: **PASS, conditional on construction discipline**
+
+Two boundaries, both requiring plain JDK types:
+
+1. **`ParsedEvent`** (`implements RamaSerializable`, crosses the agent-node boundary) gains
+   `Map<String, Map<String, Object>> derivations`.
+2. **`eventRecord`** (depot payload) gains `eventRecord.put("derivations", event.derivations)`.
+
+Both the outer map and every inner map must be `new HashMap<>()` — **no `Map.of()`**, which
+is the easy slip when writing a small fixed-shape fallback entry
+(`RAMA_VERIFIED_LEARNINGS.md:142`). Precedent already working in the tree: `relations` is a
+`List<Map<String,String>>` built with `new ArrayList<>()`/`new HashMap<>()` in
+`parseRelations` and round-trips fine. Null values also round-trip cleanly
+(`RAMA_VERIFIED_LEARNINGS.md:225`), so an absent/null `modelId` inside an entry is safe.
+
+**Required test:** extend `NonLlmPipelineTest`'s existing serialization round-trip to assert
+the nested `derivations` map survives — same treatment `relations` already gets.
+
+### Gate 5 — PState read shape: **PASS, `$$family-data` is NOT subindexed**
+
+Declared at `FamilySchemaModule.java:166-169` as three nested `mapSchema`s with no
+`.subindexed()`. Verified 2026-08-09 that the **only** `.subindexed()` in the entire main
+source tree is line 214, on `$$events-by-date`.
+
+So `selectOne(Path.key(familyId).key("events").key(eventId))` returns a real `Map`, not a
+`RocksDBWrapper`. Reading `derivations` back is plain nested key navigation — no
+`sortedMapRange(MIN, MAX)` workaround needed.
+
+### Gate 9 — deterministic `sourceId`: **PASS**
+
+`sourceId` on the email path is `gmailMessageId` — Gmail's own stable identifier, already
+carried `GmailMessage` → `ParsedEvent` → `eventRecord`. Not minted, not random, identical
+across redrains. No `UUID.randomUUID()` anywhere near it.
+
+Two conditions hold the gate:
+
+1. When `gmailMessageId` is absent (any future non-Gmail source), `sourceId` must be
+   **null/absent — never a fallback random UUID**. Precedent: the `$$raw-emails` branch
+   already guards `isPresent("*rawId")` rather than inventing an id.
+2. `derivedAt` must **not** feed any deterministic ID. It does not today, and B3's `edgeId`
+   — the one place that would have consumed a timestamp — is deferred. Flagged because a
+   timestamp leaking into an ID is exactly the C1 failure mode.
+
+### Correction to B1 step 9 — "no fake `modelId`" is mis-specified
+
+Step 9 says a record whose category came from `classifyByKeyword` "must not claim a
+`modelId`". Reading the actual node (`EmailParsingModule.java:310-352`) shows that is not
+what happens:
+
+- The model **is always called** (`model.chat(classifyPrompt)`, line 316) — and billed.
+- `classifyByKeyword` runs only *afterward*, and only when `category` came back `UNKNOWN`
+  or the JSON failed to parse (lines 347-349).
+- **`silo` and `intent` still come from the model** in that same path. Only `category` is
+  overridden.
+
+So `modelId: null` would erase two true facts: that the model ran, and that it produced
+silo/intent. That is a different lie from the one step 9 set out to prevent.
+
+**Recommended shape** — a per-node `basis` field carrying the outcome, which is what Fork 1b
+exists to make expressible:
+
+```
+derivations: {
+  "classify":         {modelId, promptVersion: CLASSIFY_PROMPT_VERSION, derivedAt, basis},
+  "extract-details":  {modelId, promptVersion: EXTRACT_PROMPT_VERSION,  derivedAt, basis}
+}
+```
+
+with `basis` ∈ `model` | `keyword-fallback` (model answered UNKNOWN) |
+`model-error-keyword-fallback` (the JSON parse threw). Closed value set, validated the same
+never-guess way `parseRelations` validates relations.
+
+### Note for B2 — `receivedAt` is NOT `assertedAt`
+
+The go-live checklist's verify-at-source item asks to confirm `*raw-emails` captures raw
+arrival time "and that B2 copies `assertedAt` from that raw record." The first half holds;
+the second half would introduce an error.
+
+`persist-raw` (`EmailParsingModule.java:282-303`) does capture `receivedAt` — *when Gmail
+received the email*. That is an **external event time**, not the time this system came to
+believe anything. Copying it into `assertedAt` would be wrong in exactly the case that is
+about to happen: a backlog ingest of a July email on the go-live date would claim
+`assertedAt` = July, when the system in fact asserted it in August. On a first-ingest of a
+months-deep backlog that skew is the norm, not the edge case.
+
+Three distinct times, to keep separate:
+
+| field | meaning | where it comes from |
+|---|---|---|
+| `receivedAt` | Gmail received the email | already on the raw + event record |
+| `assertedAt` | this system came to believe the derived claim | **stamp at append time**, like `created` |
+| `startTime`/`deadline` | the event's own time | extracted from content |
+
+`assertedAt` should be stamped in the parsing node exactly the way `created`/`updated`
+already are (`eventRecord.put("created", now)`) — computed outside the topology, carried in
+the depot payload. That satisfies C1: a `*family-events` redrain replays the stored payload
+and reproduces the original value, while a genuine reparse-of-raw produces a new assertion
+with a new `assertedAt`, which is correct.
+
+The checklist's escalation clause ("if raw arrival time is NOT captured, `assertedAt` is not
+reconstructable → escalate") does not fire, but note the gate passes for a different reason
+than stated: **nothing** makes `assertedAt` reconstructable after the fact — that is
+precisely why it must be stamped now rather than derived later.
+
+`eventTimePrecision` (step 13) does fall out for free: `parseIsoToEpoch`
+(`EmailParsingModule.java:509-524`) already branches `Instant.parse` → `LocalDateTime` →
+`LocalDate` → null, which maps onto `exact` / `exact` / `day` / `unknown`.
+
+---
+
 **This file:** `/Users/toddkeelingfolder/CORSAIR/family_assistant/docs/decisions/PLAN_provenance_temporal.md`
