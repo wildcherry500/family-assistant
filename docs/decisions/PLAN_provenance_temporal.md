@@ -408,7 +408,8 @@ baseline being re-established green before step 1.
 ## FORK 1 LOCKED → (b) nested `derivations` map (Tor, 2026-08-09) — gate answers
 
 Baseline precondition from Gate 10 is now satisfied: **156 tests, 0 failures, 0 errors,
-1 skipped, BUILD SUCCESS** (`env -u GEMINI_API_KEY mvn test`, 2026-08-09). The "152/152"
+1 skipped, BUILD SUCCESS** (`env -u GEMINI_API_KEY mvn test`, 2026-08-09; later the same day
+a plain `mvn test` reads **155 run / 0 skipped** once the `gmail` tag is excluded). The "152/152"
 figure quoted in Gate 10 was stale — see `CLAUDE_HANDOFF.md`.
 
 ### Gate 3 — record construction: **PASS as-is, but the stated premise does not apply**

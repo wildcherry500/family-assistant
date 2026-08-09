@@ -15,16 +15,16 @@
 
 Maven project root: `/Users/toddkeelingfolder/CORSAIR/family_assistant/`
 - Do NOT compile from `/Volumes/CORSAIR/family-assistant/` (hyphen) — that is an old scratch folder with one stub file and no git repo.
-- **CURRENT (2026-08-09): 156 run, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS.**
-  Verified twice via `env -u GEMINI_API_KEY mvn test`.
+- **CURRENT (2026-08-09): 155 run, 0 failures, 0 errors, 0 skipped — BUILD SUCCESS**, from a
+  plain `mvn test` with a real `GEMINI_API_KEY` still exported in the shell. **No `env -u`
+  needed and no live API spend** — the default `excluded.groups` is now `llm,gmail`, which
+  excludes `GmailIngestionTest` (the last live-spend test that ran by default) rather than
+  skipping it. That is why the count is 155 and not the 156/1-skipped figure measured
+  earlier the same day under `env -u GEMINI_API_KEY mvn test`.
+  **`mvn test` is now the correct routine command.** To opt the live path back in:
+  `mvn test -Dexcluded.groups=llm` (Gmail only) or `-Dexcluded.groups=` (everything).
   **Every count below this line is stale** — retained only for the history of what each
   session added.
-- Late in the same session the default `excluded.groups` was widened from `llm` to
-  `llm,gmail`, which excludes `GmailIngestionTest` (the last live-spend test running by
-  default) rather than skipping it. Expected effect: a plain `mvn test` becomes the green
-  baseline with one fewer test executed and 0 skipped, making `env -u` unnecessary.
-  **⚠️ That final confirming run did not finish before the session ended — re-run
-  `mvn test` first thing next session and correct this line with the real numbers.**
 - **145/145 tests passing** (non-LLM suite, no GEMINI_API_KEY required) as of the
   2026-07-17 pre-deploy gate-review session (Part 1 of the first real cluster deploy:
   unknown-ID topology guard + debug-route gating — see "Recently Completed" below).
@@ -669,8 +669,10 @@ whether the credential is present are now printed on every authorize.
 
 ### Test baseline — corrected, and now honestly green
 
-**Actual current baseline: 156 tests, 0 failures, 0 errors, 1 skipped — BUILD SUCCESS**
-(verified 2026-08-09 with `env -u GEMINI_API_KEY mvn test`).
+**Actual current baseline: 155 tests, 0 failures, 0 errors, 0 skipped — BUILD SUCCESS**
+(verified 2026-08-09 with a plain `mvn test`, after the `llm,gmail` exclusion below).
+An intermediate measurement the same day, before that exclusion, read 156 run / 1 skipped
+under `env -u GEMINI_API_KEY mvn test` — both are correct for their respective configs.
 
 Two prior numbers in this file were wrong. The "145/145" at the top and the
 "151/152" quoted for this session are both stale: B0 added 4 tests, and the real count is
@@ -684,17 +686,22 @@ profile that activates only when the env var is genuinely present.
 `GmailIngestionTest`'s guard was hardened in the same pass to reject null, blank, **and** a
 literal `${...}` — so reverting the pom cannot silently un-fix this.
 
-**⚠️ Caveat — this does NOT make plain `mvn test` green on this machine.** `GEMINI_API_KEY`
-is exported from `~/.zshrc` (real key, 53 chars), so in a normal shell the guard passes
-legitimately, `GmailIngestionTest.testGmailToFamilyData` runs, and it still hits the known
-"Executor pool is shut down" InProcessCluster ordering defect (passes in isolation, fails
-in full-suite position). That defect is untouched and still pre-existing.
+**Superseded later the same session — `mvn test` is now green on its own.** The pom fix
+alone did not achieve that: `GEMINI_API_KEY` is exported from `~/.zshrc` (real key), so in a
+normal shell the guard passed legitimately, `GmailIngestionTest.testGmailToFamilyData` ran,
+and it still hit the known "Executor pool is shut down" InProcessCluster ordering defect
+(passes in isolation, fails in full-suite position). **That defect is untouched and still
+pre-existing** — it is now simply not reached by a default run.
 
-**Use `env -u GEMINI_API_KEY mvn test` as the routine baseline command.** Two reasons: it
-is the only way to get an honest all-green signal during the deploy, and a plain `mvn test`
-makes **real Gemini calls and a real Gmail fetch** (`EmailIngestionTest`,
-`FamilyAssistantTest`, `GmailIngestionTest`) — uncontrolled spend that should not be
-happening before the D4 cost gate.
+The durable fix was widening the default `excluded.groups` from `llm` to `llm,gmail`.
+Verified: **plain `mvn test` → 155 run, 0 failures, 0 errors, 0 skipped, BUILD SUCCESS**,
+with the real key still exported and zero live API calls.
+
+Correcting an overstatement made earlier in this same session: `EmailIngestionTest`,
+`FamilyAssistantTest` and `QueryAgentTest` were **never** live spend on a default run —
+they are `@Tag("llm")` and `excluded.groups=llm` predates this session. The only test that
+was actually spending was `GmailIngestionTest`, tagged `@Tag("gmail")`, which nothing
+excluded. See `docs/decisions/PLAN_provenance_temporal.md` ("CONFLICT 3").
 
 ### RESOLVED (Tor, 2026-08-09) — canonical ZK starts CLEAN
 
