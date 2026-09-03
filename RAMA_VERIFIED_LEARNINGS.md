@@ -423,6 +423,75 @@ observed self-termination.** This is a materially worse failure mode than "an er
 swallowed" — it's "one bad write is capable of wedging the module's processing." Not yet
 decided whether/how to address this; recorded as an open gap, not a fix.
 
+### Agent-node exceptions (NOT Rama topology processing) propagate normally through the full multi-node chain — Step 0a resolved
+Verified 2026-09-02 by `IngestionFailureHandlingTest.java` (the "Ingestion Failure Handling"
+plan's Step 6 guard tests) — the first real, whole-graph test of this, not a single-node probe.
+
+**Confirmed: an uncaught exception thrown from agent-node Java code — after Agent-o-rama's own
+built-in node-level fault tolerance (`docs/Agent_O_Rama_Complete_Documentation.md:3287`, "at
+most two retries" by default) is exhausted — propagates as a normal, catchable exception all
+the way through the full multi-node agent graph, not just from the single failing node in
+isolation.** This is a genuinely different, and much better-behaved, failure mode than the Gate
+3 crash-loop above: `FamilySchemaModule` is a plain `RamaModule`, not an `AgentModule`, so it
+has no access to this fault-tolerance layer at all — which is exactly why *that* class of
+failure is fatal to the worker and *this* class is not.
+
+**The exact shape observed:** `classify`'s guard (`EmailParsingModule.java`) rethrows the
+caught exception; Agent-o-rama retries the node internally per its own `max.retries` policy;
+once exhausted, the ORIGINAL agent invocation (`AgentClient.invoke(...)`) throws
+`com.rpl.agentorama.AgentFailedException: Max retry limit exceeded (last failure: ...)`,
+observed wrapped in `java.util.concurrent.ExecutionException` at one call path. Confirmed this
+survives cleanly through `EmailIngestionModule`'s **existing, untouched**
+`catch (Exception ex) { failed++; }` around `parsingClient.invoke(m)`'s `CompletableFuture.get()`
+(`EmailIngestionModule.java:91-96`) — `IngestionFailureHandlingTest#
+classifyFailurePropagatesThroughTheFullChainToEmailIngestionModule` asserts
+`IngestionResult.failed == 1` end-to-end, batch-of-one, through the real
+`EmailIngestionModule` + `EmailParsingModule` + `FamilySchemaModule` wiring. Not just a
+single-hop check — that code was already written assuming this exact propagation shape and,
+until this session, had never actually been exercised against a real node failure.
+
+**Three real bugs found and fixed while building the test that proves this — all worth keeping
+in mind for future test-injection work on `AgentModule`/`RamaModule` classes:**
+
+1. **A `transient` instance field for test-injected dependencies silently fails.**
+   `EmailParsingModule.setModelOverrideForTesting(...)` originally set a `transient` instance
+   field, set on the module instance *before* `ipc.launchModule(module, ...)`. It never took
+   effect — the override was silently ignored and a real (successful, since a real
+   `GEMINI_API_KEY` was present in the test shell) Gemini call happened instead. Root cause:
+   `ipc.launchModule(...)` serializes the module (`implements Serializable`), and the running
+   topology executes against the *deserialized* copy — `transient` fields reset to their
+   default (`null`) across that boundary, so the pre-launch object's field value is invisible
+   to the code that actually runs. **Fix: make the field `static`, not instance** — static
+   state isn't part of an object's serialized form, so it survives the serialize/deserialize
+   round-trip. Tradeoff: it's now process-wide, so tests using it must run sequentially and
+   always set it fresh before each invocation (true of every test in this codebase already —
+   no parallel test execution is configured anywhere).
+2. **`getMirrorDepot(...)` (and likely other Rama-internal cluster calls reached from agent-node
+   code) can throw a CHECKED exception type**, not just `RuntimeException` — observed directly:
+   `org.apache.thrift.TException: module-name: ... object-name: ...` when the named
+   depot/module doesn't exist. A guard written as `catch (RuntimeException e)` does **not**
+   match this and lets it escape uncaught, silently bypassing the guard entirely (the
+   `$$ingestion-failures` record never got written, with no error at the guard site itself —
+   this failed silently and would have been easy to miss without the test). **Guard code
+   wrapping any Rama depot/PState call from agent-node Java must catch the broader
+   `Exception`, not `RuntimeException`** — and since a lambda's functional interface may not
+   declare checked exceptions, rethrowing means wrapping:
+   `throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);`, never a raw
+   `throw e;`.
+3. **A `ChatModel` test fake must override `doChat(ChatRequest)`, not `chat(String)`.**
+   `ChatModel` (langchain4j 1.8.0) is a pure-default interface — `javap` shows every method,
+   including `chat(String)`, as `default`. Overriding `chat(String)` directly on an anonymous
+   subclass looked correct and compiled fine, but silently failed to intercept calls made
+   through Agent-o-rama's agent-object builder/pooling — the call instead reached the
+   interface's own default `doChat(ChatRequest)` implementation, which is unimplemented and
+   throws `RuntimeException: Not implemented`. `javap -c` on `ChatModel`'s default
+   `chat(ChatRequest)` bytecode confirms `doChat` is the actual root of the default dispatch
+   chain (`chat(String)` → `chat(ChatRequest)` → `doChat(ChatRequest)`) — overriding `doChat`
+   directly, returning a `ChatResponse` built via
+   `ChatResponse.builder().aiMessage(AiMessage.from(json)).build()`, is the fake that actually
+   gets invoked, verified empirically (not inferred from the bytecode alone — confirmed by
+   observing the fake's logic actually execute once switched).
+
 ### A PState can only be written by the ONE topology that declared it — multiple depots must share ONE topology via successive `.source(...)` calls
 Verified 2026-07-16 (Layer 2 Commitments implementation session) the hard way first, then
 confirmed against the docs. First attempt declared `$$commitments` in the existing

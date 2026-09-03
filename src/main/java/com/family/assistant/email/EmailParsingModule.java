@@ -172,6 +172,28 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
     public static final String CLASSIFY_PROMPT_VERSION = promptHash(CLASSIFY_PROMPT_TEMPLATE);
     public static final String EXTRACT_PROMPT_VERSION  = promptHash(EXTRACT_PROMPT_TEMPLATE);
 
+    /**
+     * Test-only seam: when set (before the module is launched), the "gemini-model" agent
+     * object builder returns this instead of building a real GoogleAiGeminiChatModel — lets
+     * a test inject a ChatModel fake that deterministically throws, to exercise the
+     * classify/extract-details failure guards without a live API call. Never touched by
+     * production wiring; null by default.
+     *
+     * MUST be static, not an instance field: ipc.launchModule(...) serializes the module
+     * (implements Serializable), and the running topology executes against the deserialized
+     * copy — an instance field set on the pre-launch object is invisible there. A `transient`
+     * instance field was tried first and silently failed exactly this way (verified: the
+     * override was never invoked, and a real, live Gemini call happened instead, since a real
+     * GEMINI_API_KEY was present in the test shell). Static state is process-wide, so tests
+     * using this must run sequentially and always set it fresh before each invocation — true
+     * of every test in this codebase already (no parallel execution configured anywhere).
+     */
+    private static volatile java.util.function.Supplier<ChatModel> modelOverrideForTesting;
+
+    public void setModelOverrideForTesting(java.util.function.Supplier<ChatModel> supplier) {
+        modelOverrideForTesting = supplier;
+    }
+
     // -----------------------------------------------------------------------
     // Classification result — passed between classify and extract-details nodes
     // -----------------------------------------------------------------------
@@ -252,6 +274,9 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
 
         topology.declareAgentObjectBuilder("gemini-model",
             (setup) -> {
+                if (modelOverrideForTesting != null) {
+                    return modelOverrideForTesting.get();
+                }
                 String key = System.getProperty("GEMINI_API_KEY",
                                 System.getenv("GEMINI_API_KEY"));
                 return GoogleAiGeminiChatModel.builder()
@@ -294,10 +319,32 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     raw.put("accountLabel",   message.accountLabel);
                     raw.put("receivedAt",     message.receivedAt);
 
-                    Depot rawDepot = agentNode.getMirrorDepot("FamilySchemaModule", "*raw-emails");
-                    // APPEND_ACK: block until the raw record is durably appended and
-                    // replicated before parsing proceeds ("write-ahead" semantics).
-                    rawDepot.append(raw, AckLevel.APPEND_ACK);
+                    // getMirrorDepot(...) itself can throw (e.g. the named depot doesn't
+                    // exist) — kept INSIDE the try, not just the append call, so that failure
+                    // is caught and recorded too, not just an append-time failure.
+                    try {
+                        Depot rawDepot = agentNode.getMirrorDepot("FamilySchemaModule", "*raw-emails");
+                        // APPEND_ACK: block until the raw record is durably appended and
+                        // replicated before parsing proceeds ("write-ahead" semantics).
+                        rawDepot.append(raw, AckLevel.APPEND_ACK);
+                    } catch (Exception e) {
+                        // Highest-priority guard: if THIS append fails, *raw-emails* never got
+                        // the record — nothing upstream captured it either, so the failure
+                        // record must be self-contained (copy of `raw`), not a pointer back to
+                        // an archive that doesn't exist for this message. Rethrown after
+                        // recording so the message does not proceed to classify with no
+                        // durable trace of it ever existing.
+                        recordIngestionFailure(agentNode, familyId, message.gmailMessageId,
+                            "persist-raw", e, new HashMap<>(raw));
+                        // getMirrorDepot(...)/append(...) can throw Rama-internal checked
+                        // types (e.g. org.apache.thrift.TException, verified empirically this
+                        // session — a real exception observed here, not RuntimeException) that
+                        // Clojure lets escape across this Java boundary at runtime even though
+                        // the node-lambda's functional interface doesn't declare them. Wrap
+                        // rather than rethrow raw, so this compiles regardless, while
+                        // preserving the original as the cause.
+                        throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+                    }
 
                     agentNode.emit("classify", message);
                 })
@@ -310,10 +357,29 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
             .node("classify", "extract-details",
                 (AgentNode agentNode, GmailMessage message) -> {
 
+                    String familyId = (String) agentNode.getAgentObject("family-id");
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
                     String classifyPrompt = renderClassifyPrompt(message.body);
 
-                    String classifyJson = model.chat(classifyPrompt).trim();
+                    String classifyJson;
+                    try {
+                        classifyJson = model.chat(classifyPrompt).trim();
+                    } catch (Exception e) {
+                        // Guards the model call itself, NOT the existing JSON-parse try/catch
+                        // below (untouched — that one swallows malformed LLM *output*, a
+                        // different failure). By the time this throws, LangChain4j's own
+                        // maxRetries(5) blanket retry has already been exhausted.
+                        recordIngestionFailure(agentNode, familyId, message.gmailMessageId,
+                            "classify", e, null);
+                        // getMirrorDepot(...)/append(...) can throw Rama-internal checked
+                        // types (e.g. org.apache.thrift.TException, verified empirically this
+                        // session — a real exception observed here, not RuntimeException) that
+                        // Clojure lets escape across this Java boundary at runtime even though
+                        // the node-lambda's functional interface doesn't declare them. Wrap
+                        // rather than rethrow raw, so this compiles regardless, while
+                        // preserving the original as the cause.
+                        throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+                    }
 
                     String categoryStr = "UNKNOWN";
                     String silo = "UNKNOWN";
@@ -360,10 +426,28 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                 (AgentNode agentNode, GmailMessage message, String categoryStr,
                  String silo, String intent) -> {
 
+                    String familyId = (String) agentNode.getAgentObject("family-id");
                     ChatModel model = (ChatModel) agentNode.getAgentObject("gemini-model");
                     String today = java.time.LocalDate.now().toString();
                     String extractPrompt = renderExtractPrompt(today, message.body);
-                    String json = model.chat(extractPrompt).trim();
+                    String json;
+                    try {
+                        json = model.chat(extractPrompt).trim();
+                    } catch (Exception e) {
+                        // Same guard shape as classify's — see the comment there. Distinct
+                        // failedNode so the failure record can tell which of the two model
+                        // calls actually failed.
+                        recordIngestionFailure(agentNode, familyId, message.gmailMessageId,
+                            "extract-details", e, null);
+                        // getMirrorDepot(...)/append(...) can throw Rama-internal checked
+                        // types (e.g. org.apache.thrift.TException, verified empirically this
+                        // session — a real exception observed here, not RuntimeException) that
+                        // Clojure lets escape across this Java boundary at runtime even though
+                        // the node-lambda's functional interface doesn't declare them. Wrap
+                        // rather than rethrow raw, so this compiles regardless, while
+                        // preserving the original as the cause.
+                        throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+                    }
 
                     String title     = message.emailSubject != null
                                        ? message.emailSubject : extractTitle(message.body);
@@ -475,8 +559,29 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     eventRecord.put("created",        now);
                     eventRecord.put("updated",        now);
 
-                    Depot depot = agentNode.getMirrorDepot("FamilySchemaModule", "*family-events");
-                    depot.append(eventRecord);
+                    // getMirrorDepot(...) itself can throw — kept INSIDE the try, same
+                    // reasoning as persist-raw's guard above.
+                    try {
+                        Depot depot = agentNode.getMirrorDepot("FamilySchemaModule", "*family-events");
+                        depot.append(eventRecord);
+                    } catch (Exception e) {
+                        // Guards the append itself (bad connection, serialization) — NOT the
+                        // separate, already-documented Gate 3 crash-loop, which happens
+                        // asynchronously inside FamilySchemaModule's stream-topology
+                        // processing, on a different thread, after a successful append
+                        // returns. This catch cannot see that failure; see
+                        // RAMA_VERIFIED_LEARNINGS.md.
+                        recordIngestionFailure(agentNode, familyId, event.gmailMessageId,
+                            "write-to-store", e, null);
+                        // getMirrorDepot(...)/append(...) can throw Rama-internal checked
+                        // types (e.g. org.apache.thrift.TException, verified empirically this
+                        // session — a real exception observed here, not RuntimeException) that
+                        // Clojure lets escape across this Java boundary at runtime even though
+                        // the node-lambda's functional interface doesn't declare them. Wrap
+                        // rather than rethrow raw, so this compiles regardless, while
+                        // preserving the original as the cause.
+                        throw (e instanceof RuntimeException re) ? re : new RuntimeException(e);
+                    }
 
                     agentNode.emit("finalize", eventId);
                 })
@@ -491,6 +596,61 @@ public class EmailParsingModule extends AgentModule implements java.io.Serializa
                     // Terminal node — set the agent result
                     agentNode.result(eventId);
                 });
+    }
+
+    // -----------------------------------------------------------------------
+    // Ingestion failure recording (Step 3 — $$ingestion-failures, FamilySchemaModule)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Records a caught ingestion failure to FamilySchemaModule's *ingestion-failures depot
+     * and rethrows nothing itself — callers are responsible for rethrowing the original
+     * exception AFTER this returns (or best-effort swallows if this call itself fails, so a
+     * failure here never masks the original exception).
+     *
+     * deterministic failureId = hash(gmailMessageId|failedNode), so a repeat failure on the
+     * same message at the same node overwrites rather than accumulates on redrain/redelivery
+     * — same discipline as every other deterministic id in this codebase. Falls back to a
+     * fresh UUID only when gmailMessageId itself is null/blank (the rare persist-raw edge
+     * case) — a deliberate, narrowly-scoped exception: this record isn't consumed by any
+     * index or redrain-dependent logic, so a duplicate there is cosmetic, not a correctness
+     * bug.
+     *
+     * extraContent, when non-null, is merged in BEFORE the standard fields (so
+     * familyId/gmailMessageId/etc from the standard fields always win if there's overlap) —
+     * used only by persist-raw, to make that failure record self-contained since
+     * *raw-emails* never got the message.
+     */
+    private void recordIngestionFailure(AgentNode agentNode, String familyId,
+            String gmailMessageId, String failedNode, Exception e,
+            Map<String, Object> extraContent) {
+        try {
+            Map<String, Object> failure = new HashMap<>();
+            if (extraContent != null) {
+                failure.putAll(extraContent);
+            }
+            failure.put("familyId", familyId);
+            failure.put("gmailMessageId", gmailMessageId);
+            failure.put("failedNode", failedNode);
+            failure.put("exceptionType", e.getClass().getName());
+            failure.put("exceptionMessage", e.getMessage());
+            failure.put("failedAt", System.currentTimeMillis());
+
+            String key = (gmailMessageId != null && !gmailMessageId.isBlank())
+                ? gmailMessageId : UUID.randomUUID().toString();
+            failure.put("id", UUID.nameUUIDFromBytes(
+                (key + "|" + failedNode).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+
+            Depot failuresDepot = agentNode.getMirrorDepot("FamilySchemaModule", "*ingestion-failures");
+            failuresDepot.append(failure);
+        } catch (Exception recordingFailure) {
+            // Best-effort only — known, accepted residual risk (see the plan): if recording
+            // the failure itself fails, there's no further fallback. Must not mask the
+            // original exception the caller is about to rethrow.
+            System.err.println("[EmailParsingModule] Failed to record ingestion failure for "
+                + failedNode + " (gmailMessageId=" + gmailMessageId + "): "
+                + recordingFailure.getMessage());
+        }
     }
 
     // -----------------------------------------------------------------------

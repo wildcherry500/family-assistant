@@ -157,6 +157,14 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
         // *family-events'* processing order, but consistency with the rest of the module's
         // partitioning is still the safe default).
         setup.declareDepot("*commitment-status-changes", Depot.hashBy("familyId"));
+        // Ingestion failure records — EmailParsingModule's persist-raw/classify/
+        // extract-details/write-to-store guards append here on a caught exception, after
+        // LangChain4j's own retry budget (or the append itself) is exhausted. Immutable,
+        // write-once by design: no field on a failure record is ever updated in place —
+        // "resolved" is inferred externally (does a matching $$family-data record now exist
+        // for the same gmailMessageId), same corrections-as-new-events doctrine as
+        // $$family-data itself. hashBy("familyId"), matching every other depot here.
+        setup.declareDepot("*ingestion-failures", Depot.hashBy("familyId"));
 
         var stream = topologies.stream("family-events-stream");
         var configStream = topologies.stream("weakness-leverage-config-stream");
@@ -257,6 +265,20 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
             PState.mapSchema(String.class,
                 PState.mapSchema(String.class,
                     PState.mapSchema(String.class, Object.class))));
+
+        // Ingestion failures: familyId -> failureId -> {gmailMessageId, failedNode,
+        // exceptionType, exceptionMessage, failedAt, ...}. Two levels (familyId -> id ->
+        // record), matching $$commitments' shape, not $$family-data's three-level
+        // (familyId -> "events" -> id -> record) — the extra "events" level there exists to
+        // leave room for other categories under one family, which doesn't apply here.
+        // Written ONLY by EmailParsingModule's guard sites via *ingestion-failures below.
+        // Immutable, write-once (see the depot declaration's comment) — a single whole-record
+        // termVal, same as $$family-data, NOT $$commitments' sequential-localTransform
+        // pattern, since nothing here ever targets a narrower key within an already-written
+        // record. Gate 3 never gets triggered for this PState, by construction.
+        stream.pstate("$$ingestion-failures",
+            PState.mapSchema(String.class,
+                PState.mapSchema(String.class, Object.class)));
 
         // Config: familyId -> entryId -> leverage entry (silo/intent -> weight)
         configStream.pstate("$$leverage-map",
@@ -443,5 +465,20 @@ public class FamilySchemaModule implements RamaModule, java.io.Serializable {
                   Path.key("*familyId").key("*commitmentId").key("status").termVal("*newStatus"))
               .localTransform("$$commitments",
                   Path.key("*familyId").key("*commitmentId").key("updatedAt").termVal("*changedAt")));
+
+        // Third .source(...) branch on the SAME "stream" topology object that declared
+        // $$ingestion-failures above — same rule as the *commitment-status-changes branch's
+        // comment: a PState can only be written by the topology that declared it. Pure
+        // whole-record termVal, no localSelect/ifTrue guard needed — unlike the status-change
+        // branch above, there is no "existing record" precondition here: every failure record
+        // is either genuinely new or a legitimate overwrite of a prior identical-key failure
+        // (same message, same node, redelivered) — both cases are correct as a plain
+        // overwrite, matching $$family-data's own creation-write pattern.
+        stream.source("*ingestion-failures").out("*failure")
+          .select("*failure", Path.key("familyId")).out("*familyId")
+          .select("*failure", Path.key("id")).out("*failureId")
+          .hashPartition("*familyId")
+          .localTransform("$$ingestion-failures",
+              Path.key("*familyId").key("*failureId").termVal("*failure"));
     }
 }
