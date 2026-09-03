@@ -124,6 +124,13 @@
             <GEMINI_API_KEY>${gemini.api.key}</GEMINI_API_KEY>
           </environmentVariables>
           <excludedGroups>${excluded.groups}</excludedGroups>
+          <!-- EXPERIMENT (2026-09-02): default reuseForks=true runs every test class in one
+               shared JVM/fork. Testing whether that's the trigger for the "Executor pool is
+               shut down" cross-class collateral failures (RAMA_VERIFIED_LEARNINGS.md) — a
+               fresh JVM per class means no shared Rama-internal executor-pool state can leak
+               between classes. forkCount stays effectively 1 (no added parallelism, just
+               isolation) — see RAMA_VERIFIED_LEARNINGS.md for the result and wall-clock cost. -->
+          <reuseForks>false</reuseForks>
         </configuration>
       </plugin>
       <!-- Run FamilyAssistantApp in a real JVM: mvn compile exec:exec -->

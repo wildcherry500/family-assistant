@@ -342,6 +342,87 @@ still use whole-map `termVal` safely, because nothing ever partially updates the
 this constraint only bites when a PState value is BOTH built as one assembled `Map` AND later
 targeted by a different, narrower write.
 
+### `AckLevel.ACK` does not surface the Gate 3 `ClassCastException` to the caller, AND the worker treats it as fatal — a single bad write can crash-loop the worker under at-least-once redelivery
+Verified 2026-09-02 by `DerivationsPartialWriteProbeTest.java` (standalone probe module,
+`$$probe-family-data`, same schema shape as `$$family-data`), while confirming the Gate 3 trap
+above reproduces for a `derivations`-shaped record specifically.
+
+**The `ClassCastException` genuinely fires** — confirmed present, full stack trace, in the
+Rama worker's own log output for the failing task:
+```
+WARN [...] d.topology.streaming - :rpl.rama.distributed.topology.streaming/streaming-batch-failed
+java.lang.ClassCastException: class java.util.HashMap cannot be cast to class clojure.lang.Associative
+	at com.rpl.ramaspecter.keypath_termvalRichNav.transform_STAR_(ramaspecter.cljc:5367)
+```
+
+**But `depot.append(record, AckLevel.ACK)` on the calling side never throws that exception, and
+it is not reachable via `getCause()`.** The caller receives a generic
+`rpl.rama.distributed.exceptions.CallbackException: Callback failure` (a
+`clojure.lang.ExceptionInfo` subclass carrying ex-data, not a chained `Throwable`) — observed
+across separate runs with different, equally uninformative ex-data:
+```
+CallbackException: Callback failure {:reason :connection-closed, :data nil, :destination {...}}
+```
+and, on another run, no `:reason` key at all. The task crashes on the uncaught
+`ClassCastException`; by the time the `ACK` wait resolves, the connection has already dropped,
+so the caller sees a generic connection-failure shape, not the specific cause. This resolves
+the "not independently exercised by a passing test in this repo yet" gap the
+`Depot.append`/`AckLevel` entry above already flagged for `AckLevel.ACK`'s behavior on a
+downstream processing failure — it does wait for processing, and it does propagate *some*
+failure back to the caller, but not a diagnosable one.
+
+**Practical consequence, stated plainly: a caller currently cannot distinguish "this write
+violated Gate 3" from "the connection dropped for an unrelated reason" by catching or
+inspecting what `AckLevel.ACK` returns to Java code.** The only place the real cause is visible
+is the worker's own log line. Any production code (or test) that relies on `AckLevel.ACK`
+throwing a specific, catchable exception type to detect a Gate 3 violation will not work as
+written — it needs a log-based or state-based check instead. Not yet decided whether/how to
+address this; recorded as an open gap, not a fix.
+
+**Escalation, verified 2026-09-02 (same probe, Write #3 addition):** this is not just an
+observability gap — the Gate 3 `ClassCastException` is **fatal to the worker process**, and
+the failure repeats under at-least-once redelivery rather than terminating.
+
+**1. The worker's own health monitor treats the uncaught `ClassCastException` as fatal and
+triggers a full process shutdown.** Exact log lines, in sequence, for the single failing task:
+```
+ERROR [...] il.throwable-handler - Unexpected throwable! Will be treated as a fatal! {:event-tags [:streaming :probe-stream :topology-event :execute-batch]}
+java.lang.ClassCastException: class java.util.HashMap cannot be cast to class clojure.lang.Associative
+...
+ERROR [...] il.throwable-handler - Uncaught throwable in task thread outer loop {:event-tags nil}
+ERROR [...] .util.recurrent-task - Uncaught exception in watchable promise
+ERROR [...] .util.recurrent-task - Unexpected throwable in recurrent task {:description Worker ... 0-queue-consumer}
+ERROR [...] a-component.watchdog - One or more monitored components have become unhealthy! Triggering system shutdown. {:unhealthy-component-keys [:task-thread-systems]}
+WARN  [supervisor-...] pervisor.worker-sync - Port 2005 process has died unexpectedly. Moving to IDLE {:port 2005, :pid 1}
+```
+This is not a caught-and-logged error on an otherwise-healthy worker — the worker process
+itself dies (`"process has died unexpectedly"`).
+
+**2. At-least-once redelivery means the Supervisor re-delivers the same poisoned event to
+every restarted worker, reproducing the identical crash.** The Supervisor restarts the worker,
+and the restarted worker crashes on the **same** `ClassCastException`, at the same location
+(`com.rpl.ramaspecter.keypath_termvalRichNav.transform_STAR_`), again — observed for **three
+consecutive worker process attempts** (PID 1 → 2 → 3) within roughly 1.3 seconds:
+```
+WARN [supervisor-...] pervisor.worker-sync - Port 2005 process has died unexpectedly. Moving to IDLE {:port 2005, :pid 1}
+WARN [supervisor-...] pervisor.worker-sync - Port is supposed to be launching, but it's unexpectedly dead instead. {:port 2005, :pid 2}
+WARN [supervisor-...] pervisor.worker-sync - Port is supposed to be launching, but it's unexpectedly dead instead. {:port 2005, :pid 3}
+```
+Each restart's `streaming-batch-failed` WARN and the fatal/shutdown ERROR sequence above
+repeat verbatim. **The captured window shows no sign of the loop terminating on its own** —
+no skip, no quarantine, no eventual "give up and move on." A follow-up write (Write #3, a
+full-record replacement at the same `$$family-data`-shaped path — see the Gate 3 entry above)
+issued into this window could not get a clean answer either way: it received the same generic
+`CallbackException {:reason :connection-closed}` as Write #2, consistent with landing during
+an unrecovered crash-restart cycle rather than being evaluated and rejected on its own merits.
+
+**Practical consequence, stated plainly: a single record that trips Gate 3 does not fail once
+and get logged — it can take its worker down, and at-least-once redelivery means the same
+worker (or its replacement) keeps re-attempting and re-crashing on that same event with no
+observed self-termination.** This is a materially worse failure mode than "an error was
+swallowed" — it's "one bad write is capable of wedging the module's processing." Not yet
+decided whether/how to address this; recorded as an open gap, not a fix.
+
 ### A PState can only be written by the ONE topology that declared it — multiple depots must share ONE topology via successive `.source(...)` calls
 Verified 2026-07-16 (Layer 2 Commitments implementation session) the hard way first, then
 confirmed against the docs. First attempt declared `$$commitments` in the existing
@@ -800,6 +881,47 @@ scaling") — PStates recomputed from depot data require deterministic processin
 **Practical form:** if a topology needs a timestamp for anything an ID depends on, the timestamp
 is the *appender's* job. Stamp it into the payload; read it with `.select(..., Path.key("..."))`.
 `Gate 9` of `docs/PLAN_REVIEW_GATE.md` is the check for this.
+
+### `reuseForks=false` fixes the "Executor pool is shut down" cross-class collateral failures — confirmed, not a workaround
+Verified 2026-09-02 (Ingestion Failure Handling plan, Step 6 gate). This resolves the JVM-wide
+test-ordering hypothesis raised — and left as a candidate next step, untested — during the
+original `ZooEmailTest`/`GmailIngestionTest` diagnosis (`REASONING.md`'s 2026-07-03 "Executor-
+pool diagnosis" entry): that error was traced into Rama's own
+`com.rpl.rama.distributed.util.executor_pool.SingleThreadExecutorPool`, but the exact trigger
+was never confirmed, only two candidates flagged — `reuseForks=false`, or an upstream question.
+This is the first time `reuseForks=false` was actually tried.
+
+**Change:** `pom.xml`'s `maven-surefire-plugin` configuration gained
+`<reuseForks>false</reuseForks>` (`forkCount` left at its default — no added parallelism, just
+a fresh JVM fork per test class instead of one shared JVM/fork for the whole suite).
+
+**Before** (`reuseForks` default `true`, one shared JVM): full `mvn test` — 161 run, 1 failure,
+3 errors, **04:47** wall-clock. The 3 errors: `EmailIngestionTest.testBlankAndNullEmailsAreSkipped`
+and `testEmptyListReturnsEmptyResult` both `AgentFailedException: ... Executor pool is shut down`,
+plus `DerivationsPartialWriteProbeTest`'s `tearDown` `RejectedExecutionException` (Surefire counted
+that class as "2 tests" — the real `@Test` method plus a separately-counted lifecycle error).
+
+**After** (`reuseForks=false`, fresh JVM per class): full `mvn test` — **160 run, 1 failure, 0
+errors**, **06:31** wall-clock (+1:44, ≈+36%). `EmailIngestionTest`: `Tests run: 2, Failures: 0,
+Errors: 0` — both errors gone, clean. `DerivationsPartialWriteProbeTest`: `Tests run: 1,
+Failures: 1, Errors: 0` — the `tearDown` error is gone (hence the count dropping from 2→1), but
+the real, expected failure — `derivationsRoundTripThenPartialWrite`'s Write #3 assertion, the
+genuine Gate-3-adjacent finding from that probe — remains exactly as it should. Total count
+dropped by 1 (161→160) purely because of that lifecycle-error double-count disappearing, not
+because any real test vanished.
+
+**Conclusion: confirmed as the actual mechanism, not inferred.** A shared JVM/fork across test
+classes lets Rama's internal executor-pool state leak forward from one `InProcessCluster`
+create/close cycle into another, unrelated test class's cluster — isolating each test class in
+its own JVM eliminates that leakage entirely, with zero change to any test's own logic. This is
+a real fix for the *class* of collateral failure, not a workaround for one specific symptom.
+
+**Open question for Tor, not decided here:** `GmailIngestionTest`'s `@Tag("gmail")` exclusion
+from the default suite (`c2910e1`, 2026-08-09) was adopted specifically because of this same
+"Executor pool is shut down" defect (`REASONING.md`'s 2026-08-03 entry: "passes in isolation...
+fails only in full-suite position"). With `reuseForks=false` now confirmed to fix that class of
+failure, that tag exclusion may no longer be necessary — but that's a scope/cost decision (the
++36% wall-clock cost applies to every `mvn test` run), not something to reverse unilaterally.
 
 ---
 
