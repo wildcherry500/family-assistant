@@ -3189,3 +3189,142 @@ behavior-preserving refactor with nothing to detect but the prompt text itself.
 It never was — no append site has ever written an `actor` field, and `WebhookReceiver.markDone`
 appends exactly `{familyId, commitmentId, newStatus, changedAt}`. Comment corrected to describe
 actual behavior and point at B4 as planned work.
+
+## 2026-08-09 (backfilled 2026-09-02) — D1 cwd fix, Fork 1 gate answers, and the llm,gmail
+## exclusion close-out (commits `292dcb0`, `c2910e1`, `a0f5815`)
+
+These three commits landed same-day, immediately after the 2026-08-03 Phase A audit entry
+above, and were never logged here — this entry backfills them from the commit messages and
+diffs so the record isn't missing three commits of real decisions. Written retroactively;
+treat the commits themselves as the source of truth for anything this summary compresses.
+
+### `292dcb0` — D1: kill the cwd overload at the root; suite honestly green; Fork 1 gate answers
+
+**Root cause of the deploy blocker, found structurally, not worked around.** `rama devZookeeper`
+hardcodes a *relative* `"local-zk"` dataset directory at the bytecode level — verified by
+`javap` against the real 1.5.0 jar, only `:port` is configurable, the dataset path is a
+compile-time constant. So which ZK dataset gets used depends entirely on the launching
+process's cwd, and the same cwd ambiguity was also silently selecting `GmailService`'s
+`tokens/` directory (`new File("tokens")`, resolved against the Supervisor's cwd in cluster
+mode). One unpinned cwd was overloading two unrelated concerns.
+
+Fix was structural, not configuration: one canonical absolute ZK dataset
+(`/Users/toddkeelingfolder/rama-zk`), with both candidate cwds' `local-zk` replaced by
+symlinks to it — a symlink makes the wrong-cwd launch impossible rather than merely
+discouraged. Both prior datasets archived (moved, not deleted). Canonical starts clean per
+Tor's call — the July metadata was already orphaned (`~/rama-data` was 12KB, no RocksDB
+artifacts).
+
+`GmailService`'s token directory was pinned absolute the same way (`FA_TOKENS_DIR`, override
+must itself be absolute — a relative override would reintroduce the exact bug), and
+`tokensDirectory()` now refuses three ways this previously failed silently: a relative
+override, a missing directory, and a missing `StoredCredential` unless interactive consent
+was explicitly enabled. That third check matters specifically because a cluster worker
+cannot answer a browser OAuth flow — the old failure mode was a hang on `127.0.0.1:8888`
+*after* startup had already reported success. Interactive consent is opted in from
+`GmailOAuthSetup`/`GmailWatchSetup`'s `main()`, not from `renewWatch()`, so a future
+non-interactive caller of `renewWatch()` still fails loud instead of hanging.
+
+**Baseline hygiene, same commit:** `pom.xml` was passing the *literal string*
+`"${env.GEMINI_API_KEY}"` into the test JVM whenever the env var was unset (Maven does not
+substitute an unset `${env.X}`), which is non-null, so every `assumeTrue(key != null)` guard
+passed and LLM/Gmail tests ran with a garbage key instead of skipping. Fixed with an empty
+default property overridden by a `gemini-key` Maven profile that activates only when the env
+var is genuinely present. `GmailIngestionTest`'s own guard was hardened to also reject blank
+and a literal `${...}`, so reverting the pom alone can't silently reintroduce the bug.
+
+**Fork 1 (nested `derivations` map) gate answers — all four PASS, with two corrections rather
+than rubber stamps**, fully detailed in `docs/decisions/PLAN_provenance_temporal.md`'s "FORK 1
+LOCKED" section: Gate 3's premise doesn't apply (`derivations` is a depot-payload key, never a
+PState partial-write target — `$$family-data` has exactly one writer, re-verified by grep);
+Gate 9's `sourceId = gmailMessageId` holds on two conditions (an absent id must stay null,
+never a fallback UUID; `derivedAt` must never feed a deterministic ID). B1 step 9
+("no fake `modelId`" on the keyword-fallback path) was found mis-specified: the model is
+*always* called and billed, and still produces `silo`/`intent` even when `classifyByKeyword`
+overrides `category` — `modelId: null` would erase true facts, not just suppress a false one.
+Also flagged: `receivedAt` (Gmail's arrival time) is NOT `assertedAt` (when this system came to
+believe the claim) — copying it would misdate an entire backlog ingest on go-live.
+
+Tests: 156 run, 0 failures, 0 errors, 1 skipped (`env -u GEMINI_API_KEY mvn test`) — corrects
+both the handoff's stale "145/145" and this session's inherited "151/152"; B0 added 4 tests,
+real total is 156. Caveat recorded at the time: `GEMINI_API_KEY` is exported from `~/.zshrc`,
+so a *plain* `mvn test` still ran the live-LLM tests and still hit the known
+"Executor pool is shut down" defect — `env -u` was the documented routine command as of this
+commit, superseded two commits later.
+
+### `c2910e1` — Verify-before-wiring: two checklist claims are wrong at source; exclude gmail tag
+
+B1 was approved to start but was deliberately **not** started this session — the go-live
+checklist asked for two claims to be confirmed at source before wiring B1, and both came back
+negative, so writing B1 to the checklist's stated shape would have been wrong.
+
+**Conflict 1 — `classifyByKeyword` DOES fire on an in-schema `UNKNOWN`, not only on off-schema
+output as the checklist claimed.** `EmailParsingModule.java:317-349`: `UNKNOWN` is both the
+sentinel default *and* a member of the accepted category enum, so all four cases (model said
+`UNKNOWN`, model said something off-schema, the `category` field was missing, or the JSON
+parse threw) collapse to the identical string `"UNKNOWN"` at line 347 — the code cannot
+distinguish them today. B1 has to create that distinction, not assume it already exists:
+two closed-set fields, `outcome` (`ok`/`off-schema`/`parse-error`) and `categoryBasis`
+(`model`/`keyword`/`none`), added alongside the existing control flow unchanged, same
+discipline as B0. `none` is a real case — off-schema output with no keyword match either
+leaves `UNKNOWN` with nothing having actually decided it.
+
+**Conflict 2 — `created` is NOT recomputed on redrain, so mirroring its mechanism for
+`assertedAt` is safe; the checklist's warning was inverted.** `created` is stamped at
+`EmailParsingModule.java:418` inside the `write-to-store` *agent node*, into the depot payload,
+before `depot.append()` — `FamilySchemaModule` only ever reads it back
+(`.select("*record", Path.key("created"))`). That is exactly the append-time-stamping
+discipline C1 requires, and is the same rule the Gate 9 entry in `RAMA_VERIFIED_LEARNINGS.md`
+already states. The distinction the checklist was actually reaching for is reparse-of-raw-email
+(re-running the node produces a genuinely new assertion time, correctly) versus a
+`*family-events` redrain (replays the stored payload verbatim) — those are different
+operations, and only the second one is what "redrain" means for this depot.
+
+**Conflict 3 (minor) — the `llm`-exclusion fix the checklist proposed already existed.**
+`pom.xml`'s `excluded.groups=llm` predates this session, so `EmailIngestionTest`,
+`FamilyAssistantTest`, and `QueryAgentTest` were never live-spend by default — correcting an
+overstatement in this same session's earlier summary. **The actual gap was
+`GmailIngestionTest`**, tagged `@Tag("gmail")` rather than `@Tag("llm")`, so nothing excluded
+it. Fixed by widening the default to `excluded.groups=llm,gmail`.
+
+**Cost-gate input, verified rather than assumed:** the model is called *twice* per email
+(classify + extract) regardless of outcome — `classifyByKeyword` does not save a call, it only
+runs after the classify call is already made and billed. Backlog cost estimates should price at
+count × 2.
+
+Baseline recorded as last-verified-green at commit time: 156 run / 0 failures / 0 errors /
+1 skipped, via `env -u GEMINI_API_KEY mvn test`, verified twice. The confirming run for the new
+`llm,gmail` exclusion (i.e. whether a *plain* `mvn test` was now clean) had not finished before
+session end — flagged explicitly as the first thing to re-run next session, which is exactly
+what `a0f5815` is.
+
+**Parked, not decided:** the `classify` node will need to emit a 5th value once the
+`derivations` map lands (4 today), and whether Agent-o-rama's node-lambda has an arity ceiling
+that blocks this was **not confirmed** — research was cut short. Next session must check the
+docs or sidestep with a `RamaSerializable` carrier object rather than guessing the ceiling
+doesn't exist.
+
+### `a0f5815` — Confirm the llm,gmail exclusion: plain `mvn test` is 155/0/0/0 green
+
+The confirming run parked by `c2910e1` completed: **155 run, 0 failures, 0 errors, 0 skipped,
+BUILD SUCCESS**, from a *plain* `mvn test` with the real `GEMINI_API_KEY` still exported from
+`~/.zshrc`, and zero live API calls made. Count drops 156 → 155 exactly as predicted:
+`GmailIngestionTest.testGmailToFamilyData` is now excluded by tag rather than reached and
+skipped by an internal assumption, so the known "Executor pool is shut down" defect is no
+longer reached by a default run. **That defect itself is untouched — excluded, not fixed.**
+
+`mvn test` (no `env -u` prefix) is now the correct routine command; the previous two commits'
+`env -u GEMINI_API_KEY mvn test` guidance is superseded. `CLAUDE_HANDOFF.md` was reconciled so
+the 156/1-skipped figure (pre-exclusion) and the 155/0-skipped figure (post-exclusion) both
+appear without reading as a contradiction, and the stale "does NOT make plain `mvn test` green"
+caveat was removed now that it no longer applies.
+
+### Net state after all three commits
+
+B1 (provenance fields — `derivedAt`, `sourceId`, hash-derived `promptVersion`, the
+`derivations` map) is **still not started**, now blocked on two things surfaced by the
+verify-before-wiring pass rather than ready to write to the original checklist shape: the
+`outcome`/`categoryBasis` distinction (Conflict 1) and the AOR node-lambda arity question
+(parked). Baseline as of `a0f5815` is 155 run / 0 failures / 0 errors / 0 skipped via a plain
+`mvn test`, with `GmailIngestionTest`'s pre-existing "Executor pool is shut down" defect
+excluded from that run by tag, not resolved.
