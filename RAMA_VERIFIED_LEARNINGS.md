@@ -43,6 +43,57 @@ it has a hard boundary. Verbatim refusal received:
 - Which predicate/operation to use in a given topology — i.e. design questions.
 - Concrete dataflow/topology code examples.
 - Inferred or reasoned-out behavior not explicitly stated in the docs.
+- **Undocumented internal/behavioral guarantees — even when framed as a plain "is X
+  supported" API-surface question.** If the specific claim (a serialization round-trip
+  guarantee, an internal storage representation, an undocumented edge case) isn't
+  explicitly stated in the public docs/javadocs it can see, it will not infer or reason
+  it out, and it will not say yes/no by extrapolating from an adjacent documented
+  pattern. See the RocksDB-open-leaf example below — a second, distinct refusal
+  category from the dataflow one above, discovered 2026-09-02.
+
+**Refusal category 2 — undocumented internal serialization behavior (2026-09-02)**
+
+Question asked: whether an arbitrary nested `Map<String, Map<String, Object>>` value,
+written via a whole-record `termVal` under an `Object.class`-typed (open,
+schema-undeclared) PState leaf — i.e. `PState.mapSchema(String.class, Object.class)`,
+not a nested `PState.mapSchema` declared in the schema itself — is documented/verified
+to round-trip correctly through RocksDB serialization/deserialization in 0.8.0, with a
+citation either way.
+
+Verbatim refusal received:
+
+> "This assistant doesn't have access to the level of internal/behavioral detail you're
+> asking about for Rama 0.8.0, and the router has classified your question as out of
+> scope for that reason. ... The available Rama documentation I can use (reference docs,
+> user guides, and public Javadocs) does not expose or guarantee that level of RocksDB
+> round-trip behavior for arbitrary nested Map<String, Map<String, Object>> values stored
+> under an open Object leaf. Since I can't see any such explicit guarantee in the public
+> docs, I also can't authoritatively claim that it is or is not guaranteed in 0.8.0 beyond
+> what those docs state."
+
+**Why this matters for query formulation:** an earlier Chat-o-rama thread in this
+project's history *did* get a confirmed, cited answer for a superficially similar
+question — "what would a map of map of documents look like in a PState" — because that
+question was about a **declared schema pattern**
+(`mapSchema(String, mapSchema(String, fixedKeysSchema(...)))`), which is documented, with
+a real `com.rpl.rama.PState.mapSchema` javadoc citation. The refused question was about an
+**undeclared runtime value** stored under an open `Object.class` leaf — a claim about
+internal serialization behavior, not about the schema DSL. These look like the same
+question ("can PStates hold nested maps?") but are not: one is public API surface, the
+other is an implementation guarantee nowhere in the public docs.
+
+**Rule going forward:** before asking Chat-o-rama, classify the question as (a) schema
+DSL / declared-type / operational — ask Chat-o-rama, expect a citation; or (b) a
+guarantee about serialization internals, storage representation, or any behavior not
+spelled out in a doc page or javadoc signature — skip Chat-o-rama, go straight to the
+existing fallback order (jar inspection via `javap`/decompile, then an empirical
+`InProcessCluster` test that actually writes and reads back the value and asserts the
+structure survives). Precedent for exactly this shape of test:
+`RAMA_VERIFIED_LEARNINGS.md`'s own "Null map values round-trip through Rama serialization
+(1.5.0)" entry below was established by empirical test after a similar internal-behavior
+question, not by doc citation. Asking Chat-o-rama first for category-(b) questions costs a
+round trip without changing what happens next — the fallback was always going to be jar
+inspection or InProcessCluster empiricism.
 
 **Fallback order when Chat-o-rama declines**
 REVISED 2026-07-26 — jar extraction promoted above official docs; see "A cited doc quote is not
@@ -753,6 +804,49 @@ is the *appender's* job. Stamp it into the payload; read it with `.select(..., P
 ---
 
 ## Unverified — do not use without confirming
+
+### OPEN INVESTIGATION: does a nested `Map<String, Map<String, Object>>` value round-trip under an `Object.class`-typed PState leaf? (B1 `derivations` design)
+Logged 2026-09-02, raised by the B1 provenance-stamping design (`docs/decisions/PLAN_provenance_temporal.md`,
+Fork 1 — nested `derivations` map keyed by node name). Still open; do not wire B1 to this shape
+until resolved by an actual test against our pinned jars.
+
+**Chat-o-rama refused this as an internal/behavioral-guarantee question** (see "Chat-o-rama scope
+limitation," refusal category 2, above) — it will not confirm or deny an undocumented RocksDB
+round-trip guarantee. Reformulated to ask about documented serialization support instead; it
+confirmed (with citation) that Rama has built-in serialization for "standard Java types" and that
+`HashMap`/`HashSet` specifically are documented as supported with consistent serialization
+(`rama-shared`, "Custom serialization"), but could not confirm nested collections (a `Map` whose
+values are themselves `Map`s) specifically, and was explicit that going further would be inference,
+not documentation.
+
+**The one piece of example code Chat-o-rama could point to does NOT clear the bar**, verified by
+reading the actual source directly (not the chat's paraphrase) at
+`~/agent-o-rama/examples/java/src/main/java/com/rpl/agent/basic/PStateStoreAgent.java`:
+
+1. **Version mismatch.** That checkout's `pom.xml` pins `agent-o-rama:0.9.0` / `rama:1.8.0`
+   (confirmed via `pom.xml` and `git remote`) — not our project's pinned `0.8.0`/`1.5.0`. Same
+   staleness caveat this file already applies to the `rama-examples` repo: a hint, not a fact for
+   our version.
+2. **Wrong shape.** The example's `Object.class`-typed `"metadata"` field (nested inside a
+   `fixedKeysSchema`, analogous to a key inside our `$$family-data` record) holds a
+   `Map<String,Object>` whose only nested value is a `List<String>` (`meta1.put("skills",
+   List.of("clojure","java"))`) — one level of *list* nesting, not a *map of maps*. It does not
+   demonstrate `derivations`'s actual shape (`Map<String, Map<String, Object>>`).
+3. **Never actually asserted.** Neither `PStateStoreAgent.main()`'s printed output nor
+   `PStateStoreAgentTest`'s JUnit assertions ever read the `metadata` field back and check its
+   value — the test asserts `companyName`/`deptName`/`employeeCount`/`averageSalary`/
+   `allCompanyEmployeeNames`, never `queriedEmployee.get("metadata")`. So even on its own pinned
+   version, this "example" only proves the write doesn't throw at write time, not that the nested
+   structure survives a read.
+
+**What would resolve this:** the standard fallback this file already prescribes — write the
+smallest `InProcessCluster` test against our actual `0.8.0`/`1.5.0` jars that writes a
+`derivations`-shaped `Map<String, Map<String, Object>>` value under `$$family-data`'s existing
+`Object.class`-typed leaf (via the same whole-record `termVal` write `FamilySchemaModule.java:279`
+already does), reads it back, and asserts the nested structure survives structurally intact —
+mirroring the existing precedent of the "Null map values round-trip through Rama serialization
+(1.5.0)" entry below, which was established the same way for a different internal-behavior
+question. Not yet written.
 
 ### OPEN INVESTIGATION: does `rama.yaml`'s `worker.child.opts` apply to CLI-deployed modules at all?
 Logged 2026-07-19 (Part 3 restart session), deliberately deferred to a dedicated future session —
